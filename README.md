@@ -99,6 +99,17 @@ go run dedupe.go ~/Pictures/Shutterfly --dry-run
 go run verify.go "TOKEN" "LIBRARY_ID" ~/Pictures/Shutterfly
 ```
 
+## Uploading to Google Photos
+
+After downloading, you can upload to Google Photos via Google Drive:
+
+1. Move/copy your downloaded photos to Google Drive (or a synced folder)
+2. Go to [Google Photos Settings](https://photos.google.com/settings)
+3. Enable **"Google Drive - Sync photos & videos from Drive to Google Photos"**
+4. Photos in Drive will automatically appear in Google Photos
+
+> **Tip:** Google Photos will use the file modification dates (preserved from EXIF) to organize photos chronologically.
+
 ## Notes
 
 - Recommended workers: 10-100 (higher may cause rate limiting)
