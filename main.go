@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -38,7 +39,7 @@ func NewDownloader(token, outputDir string, rateLimit float64, verbose bool) *Do
 		rateLimit:  time.Duration(rateLimit * float64(time.Second)),
 		maxRetries: 3,
 		verbose:    verbose,
-		client:     &http.Client{Timeout: 60 * time.Second},
+		client:     &http.Client{Timeout: 300 * time.Second},
 	}
 	d.claims, d.expiry = parseToken(token)
 	os.MkdirAll(outputDir, 0755)
@@ -227,16 +228,40 @@ func (d *Downloader) DownloadPhoto(momentID, outputDir string, index int) bool {
 
 	fpath := filepath.Join(outputDir, filename)
 
-	// Skip if file already exists
-	if _, err := os.Stat(fpath); err == nil {
-		fmt.Printf("Skipping (exists): %s\n", filename)
-		return true
-	}
-
+	// Read the new file data first
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Printf("Error reading %s: %v\n", momentID, err)
 		return false
+	}
+
+	// If file exists, compare content to decide if it's truly a duplicate
+	if existingData, err := os.ReadFile(fpath); err == nil {
+		// Compare file sizes first (fast check)
+		if len(existingData) == len(data) {
+			// Same size - compare content hash
+			existingHash := sha256.Sum256(existingData)
+			newHash := sha256.Sum256(data)
+			if existingHash == newHash {
+				// Identical content - skip
+				fmt.Printf("Skipping (identical): %s\n", filename)
+				return true
+			}
+		}
+		// Different content - save to Duplicates folder
+		dupDir := filepath.Join(outputDir, "Duplicates")
+		os.MkdirAll(dupDir, 0755)
+		ext := filepath.Ext(filename)
+		base := strings.TrimSuffix(filename, ext)
+		newFilename := fmt.Sprintf("%s_%s%s", base, momentID, ext)
+		fpath = filepath.Join(dupDir, newFilename)
+		
+		// Check if this specific file already exists in Duplicates
+		if _, err := os.Stat(fpath); err == nil {
+			fmt.Printf("Skipping (exists in Duplicates): %s\n", newFilename)
+			return true
+		}
+		fmt.Printf("Different content, saving to Duplicates: %s\n", newFilename)
 	}
 
 	if err := os.WriteFile(fpath, data, 0644); err != nil {
@@ -274,19 +299,34 @@ func (d *Downloader) DownloadAll(workers int) (int, int) {
 
 	fmt.Printf("Found %d photos to download (using %d workers)\n", len(momentIDs), workers)
 	
+	// Create/open failures log file
+	failLog, err := os.OpenFile(filepath.Join(d.outputDir, "failed_downloads.txt"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		fmt.Printf("Warning: couldn't create failure log: %v\n", err)
+	} else {
+		defer failLog.Close()
+		failLog.WriteString(fmt.Sprintf("# Failed downloads - %s\n", time.Now().Format(time.RFC3339)))
+	}
+	
+	type result struct {
+		id      string
+		success bool
+	}
+	
 	type job struct {
 		id    string
 		index int
 	}
 	
 	jobs := make(chan job, len(momentIDs))
-	results := make(chan bool, len(momentIDs))
+	results := make(chan result, len(momentIDs))
 	
 	// Start workers
 	for w := 0; w < workers; w++ {
 		go func() {
 			for j := range jobs {
-				results <- d.DownloadPhoto(j.id, d.outputDir, j.index)
+				success := d.DownloadPhoto(j.id, d.outputDir, j.index)
+				results <- result{j.id, success}
 				time.Sleep(d.rateLimit)
 			}
 		}()
@@ -301,15 +341,101 @@ func (d *Downloader) DownloadAll(workers int) (int, int) {
 	// Collect results
 	success, fail := 0, 0
 	for i := 0; i < len(momentIDs); i++ {
-		if <-results {
+		r := <-results
+		if r.success {
 			success++
 		} else {
 			fail++
+			if failLog != nil {
+				failLog.WriteString(r.id + "\n")
+			}
 		}
 		if (i+1)%100 == 0 {
 			fmt.Printf("Progress: %d/%d (success: %d, fail: %d)\n", i+1, len(momentIDs), success, fail)
 		}
 	}
+	return success, fail
+}
+
+func (d *Downloader) RetryFailed(workers int) (int, int) {
+	failPath := filepath.Join(d.outputDir, "failed_downloads.txt")
+	data, err := os.ReadFile(failPath)
+	if err != nil {
+		fmt.Printf("No failed_downloads.txt found: %v\n", err)
+		return 0, 0
+	}
+	
+	var momentIDs []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			momentIDs = append(momentIDs, line)
+		}
+	}
+	
+	if len(momentIDs) == 0 {
+		fmt.Println("No failed downloads to retry")
+		return 0, 0
+	}
+	
+	fmt.Printf("Retrying %d failed downloads (using %d workers)\n", len(momentIDs), workers)
+	
+	// Create new failures log
+	failLog, _ := os.OpenFile(failPath+".new", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if failLog != nil {
+		defer failLog.Close()
+		failLog.WriteString(fmt.Sprintf("# Failed downloads (retry) - %s\n", time.Now().Format(time.RFC3339)))
+	}
+	
+	type result struct {
+		id      string
+		success bool
+	}
+	
+	type job struct {
+		id    string
+		index int
+	}
+	
+	jobs := make(chan job, len(momentIDs))
+	results := make(chan result, len(momentIDs))
+	
+	for w := 0; w < workers; w++ {
+		go func() {
+			for j := range jobs {
+				success := d.DownloadPhoto(j.id, d.outputDir, j.index)
+				results <- result{j.id, success}
+				time.Sleep(d.rateLimit)
+			}
+		}()
+	}
+	
+	for i, id := range momentIDs {
+		jobs <- job{id, i + 1}
+	}
+	close(jobs)
+	
+	success, fail := 0, 0
+	for i := 0; i < len(momentIDs); i++ {
+		r := <-results
+		if r.success {
+			success++
+		} else {
+			fail++
+			if failLog != nil {
+				failLog.WriteString(r.id + "\n")
+			}
+		}
+	}
+	
+	// Replace old fail log with new one
+	if fail > 0 {
+		os.Rename(failPath+".new", failPath)
+	} else {
+		os.Remove(failPath+".new")
+		os.Remove(failPath)
+	}
+	
 	return success, fail
 }
 
@@ -328,7 +454,8 @@ func main() {
 	outputDir := flag.String("output", "shutterfly_photos", "Output directory")
 	rateLimit := flag.Float64("rate-limit", 0.05, "Delay between requests per worker (seconds)")
 	workers := flag.Int("workers", 10, "Number of parallel download workers")
-	countOnly := flag.Bool("count", false, "Only count albums/photos")
+	countOnly := flag.Bool("count", false, "Only count photos")
+	retryFailed := flag.Bool("retry", false, "Retry failed downloads from failed_downloads.txt")
 	verbose := flag.Bool("verbose", false, "Debug logging")
 	flag.Parse()
 
@@ -359,9 +486,17 @@ func main() {
 
 	if *countOnly {
 		d.Count()
+	} else if *retryFailed {
+		fmt.Println("Retrying failed downloads...")
+		success, fail := d.RetryFailed(*workers)
+		fmt.Printf("\nRetry complete! Success: %d, Still failed: %d\n", success, fail)
 	} else {
 		fmt.Println("Starting download...")
 		success, fail := d.DownloadAll(*workers)
 		fmt.Printf("\nComplete! Success: %d, Failed: %d\n", success, fail)
+		if fail > 0 {
+			fmt.Printf("Failed IDs logged to: %s/failed_downloads.txt\n", *outputDir)
+			fmt.Println("Run with -retry to retry failed downloads")
+		}
 	}
 }
