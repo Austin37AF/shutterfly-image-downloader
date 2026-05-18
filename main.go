@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -12,16 +13,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/rwcarlsen/goexif/exif"
 )
 
-type Album struct {
-	ID         string
-	Name       string
-	PhotoCount int
-}
 
 type Downloader struct {
 	token      string
@@ -106,10 +103,16 @@ func (d *Downloader) request(method, url string, body io.Reader) (*http.Response
 
 		req, _ := http.NewRequest(method, url, body)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-		req.Header.Set("Origin", "https://photos.shutterfly.com")
-		req.Header.Set("Referer", "https://photos.shutterfly.com/")
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15")
+		req.Header.Set("Origin", "https://photos3.shutterfly.com")
+		req.Header.Set("Referer", "https://photos3.shutterfly.com/")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
 		req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		req.Header.Set("Authorization", "Bearer "+d.token)
+		req.Header.Set("x-api-key", "zlrHU7h6cTGTApk3IbOU0aVuxlEJkPeA")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Site", "same-site")
 
 		d.log("Request: %s %s", method, url)
 		resp, err := d.client.Do(req)
@@ -130,21 +133,53 @@ func (d *Downloader) userID() string {
 	if uid := os.Getenv("LIFE_UID"); uid != "" {
 		return uid
 	}
+	// Try sfly3_uid first (newer format without leading zeros)
+	if uid, ok := d.claims["sfly3_uid"].(string); ok {
+		d.log("Using sfly3_uid: %s", uid)
+		return uid
+	}
 	if uid, ok := d.claims["sfly_uid"].(string); ok {
+		d.log("Using sfly_uid: %s", uid)
 		return uid
 	}
 	return ""
 }
 
-func (d *Downloader) GetAlbums() ([]Album, error) {
+func (d *Downloader) GetAllMomentIDs() ([]string, error) {
+	uid := d.userID()
+	d.log("User ID: %s", uid)
+	
+	// Use searchMoments - the second param is a library ID
+	libraryID := os.Getenv("SHUTTERFLY_LIBRARY_ID")
+	if libraryID == "" {
+		libraryID = uid
+	}
+	d.log("Library ID: %s", libraryID)
+	
 	payload, _ := json.Marshal(map[string]interface{}{
-		"method":  "album.getAlbums",
-		"params":  []interface{}{d.token, d.userID(), nil, nil, true},
+		"method": "searchMoments",
+		"params": []interface{}{
+			d.token,
+			libraryID,
+			true,
+			[]interface{}{},
+			[]interface{}{},
+			[]interface{}{},
+			[]interface{}{},
+			[]interface{}{},
+			false,
+			[]interface{}{},
+			[]interface{}{},
+			nil,
+			"",
+			nil, nil, nil, nil, nil, nil, nil,
+			true,
+		},
 		"headers": map[string]string{"X-SFLY-SubSource": "library"},
 		"id":      nil,
 	})
 
-	resp, err := d.request("POST", "https://cmd.thislife.com/json?method=album.getAlbums", strings.NewReader(string(payload)))
+	resp, err := d.request("POST", "https://photos-api3.shutterfly.com/photos/json?method=searchMoments", strings.NewReader(string(payload)))
 	if err != nil {
 		return nil, err
 	}
@@ -154,73 +189,26 @@ func (d *Downloader) GetAlbums() ([]Album, error) {
 		Result struct {
 			Success bool   `json:"success"`
 			Message string `json:"message"`
-			Payload [][]struct {
-				Story struct {
-					UID                string `json:"uid"`
-					Name               string `json:"name"`
-					VisibleMomentCount int    `json:"visible_moment_count"`
-				} `json:"story"`
+			Payload struct {
+				NumberMatches int      `json:"number_matches"`
+				Moments       []string `json:"moments"`
 			} `json:"payload"`
 		} `json:"result"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
 
 	if !result.Result.Success {
 		return nil, fmt.Errorf("failed: %s", result.Result.Message)
 	}
 
-	var albums []Album
-	if len(result.Result.Payload) > 0 {
-		for _, p := range result.Result.Payload[0] {
-			albums = append(albums, Album{p.Story.UID, p.Story.Name, p.Story.VisibleMomentCount})
-		}
-	}
-	return albums, nil
+	d.log("Found %d moments", result.Result.Payload.NumberMatches)
+	return result.Result.Payload.Moments, nil
 }
 
-func (d *Downloader) GetMomentIDs(albumID string) ([]string, error) {
-	payload, _ := json.Marshal(map[string]interface{}{
-		"method":  "album.getAlbum",
-		"params":  []interface{}{d.token, albumID, "startupItem", nil, false, true, true},
-		"headers": map[string]string{"X-SFLY-SubSource": "albums"},
-		"id":      nil,
-	})
-
-	resp, err := d.request("POST", "https://cmd.thislife.com/json?method=album.getAlbum", strings.NewReader(string(payload)))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Result struct {
-			Success bool `json:"success"`
-			Payload struct {
-				Moments string `json:"moments"`
-			} `json:"payload"`
-		} `json:"result"`
-	}
-	json.NewDecoder(resp.Body).Decode(&result)
-
-	if !result.Result.Success {
-		return nil, fmt.Errorf("failed to get album")
-	}
-
-	var ids []string
-	moments := result.Result.Payload.Moments
-	for i := 0; i+277 <= len(moments); i += 277 {
-		if id := strings.TrimLeft(moments[i+9:i+25], "0"); id != "" {
-			ids = append(ids, id)
-		}
-	}
-	return ids, nil
-}
-
-func sanitize(name string) string {
-	return strings.TrimSpace(regexp.MustCompile(`[^a-zA-Z0-9 \-_]`).ReplaceAllString(name, ""))
-}
-
-func (d *Downloader) DownloadPhoto(momentID, albumDir string, index int) bool {
+func (d *Downloader) DownloadPhoto(momentID, outputDir string, index int) bool {
 	params := url.Values{"accessToken": {d.token}, "momentId": {momentID}, "source": {"library"}}
 	resp, err := d.request("GET", "https://io.thislife.com/download?"+params.Encode(), nil)
 	if err != nil {
@@ -237,7 +225,7 @@ func (d *Downloader) DownloadPhoto(momentID, albumDir string, index int) bool {
 		}
 	}
 
-	fpath := filepath.Join(albumDir, filename)
+	fpath := filepath.Join(outputDir, filename)
 
 	// Skip if file already exists
 	if _, err := os.Stat(fpath); err == nil {
@@ -256,72 +244,90 @@ func (d *Downloader) DownloadPhoto(momentID, albumDir string, index int) bool {
 		return false
 	}
 
+	// Set file modification time from EXIF DateTimeOriginal
+	if originalTime := extractExifDate(data); !originalTime.IsZero() {
+		os.Chtimes(fpath, originalTime, originalTime)
+	}
+
 	fmt.Printf("Downloaded: %s\n", filename)
 	return true
 }
 
-func (d *Downloader) DownloadAlbum(album Album) (int, int) {
-	fmt.Printf("\n=== %s (%d photos) ===\n", album.Name, album.PhotoCount)
+func extractExifDate(data []byte) time.Time {
+	x, err := exif.Decode(bytes.NewReader(data))
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := x.DateTime()
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
 
-	albumDir := filepath.Join(d.outputDir, sanitize(album.Name))
-	os.MkdirAll(albumDir, 0755)
-
-	ids, err := d.GetMomentIDs(album.ID)
+func (d *Downloader) DownloadAll(workers int) (int, int) {
+	momentIDs, err := d.GetAllMomentIDs()
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return 0, 0
 	}
 
+	fmt.Printf("Found %d photos to download (using %d workers)\n", len(momentIDs), workers)
+	
+	type job struct {
+		id    string
+		index int
+	}
+	
+	jobs := make(chan job, len(momentIDs))
+	results := make(chan bool, len(momentIDs))
+	
+	// Start workers
+	for w := 0; w < workers; w++ {
+		go func() {
+			for j := range jobs {
+				results <- d.DownloadPhoto(j.id, d.outputDir, j.index)
+				time.Sleep(d.rateLimit)
+			}
+		}()
+	}
+	
+	// Send jobs
+	for i, id := range momentIDs {
+		jobs <- job{id, i + 1}
+	}
+	close(jobs)
+	
+	// Collect results
 	success, fail := 0, 0
-	for i, id := range ids {
-		if d.DownloadPhoto(id, albumDir, i+1) {
+	for i := 0; i < len(momentIDs); i++ {
+		if <-results {
 			success++
 		} else {
 			fail++
 		}
-		time.Sleep(d.rateLimit)
+		if (i+1)%100 == 0 {
+			fmt.Printf("Progress: %d/%d (success: %d, fail: %d)\n", i+1, len(momentIDs), success, fail)
+		}
 	}
 	return success, fail
 }
 
-func (d *Downloader) DownloadAll() (int, int) {
-	albums, err := d.GetAlbums()
-	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		return 0, 0
-	}
-
-	fmt.Printf("Found %d albums\n", len(albums))
-	totalSuccess, totalFail := 0, 0
-
-	for _, album := range albums {
-		s, f := d.DownloadAlbum(album)
-		totalSuccess += s
-		totalFail += f
-	}
-	return totalSuccess, totalFail
-}
-
 func (d *Downloader) Count() {
-	albums, err := d.GetAlbums()
+	momentIDs, err := d.GetAllMomentIDs()
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-
-	total := 0
-	fmt.Printf("\n%d albums:\n", len(albums))
-	for _, a := range albums {
-		fmt.Printf("  - %s: %d\n", a.Name, a.PhotoCount)
-		total += a.PhotoCount
-	}
-	fmt.Printf("\nTotal: %d photos\n", total)
+	fmt.Printf("\nTotal: %d photos\n", len(momentIDs))
 }
 
 func main() {
 	token := flag.String("token", "", "Shutterfly access token (or set SHUTTERFLY_TOKEN)")
+	libraryID := flag.String("library-id", "", "Shutterfly library ID (or set SHUTTERFLY_LIBRARY_ID)")
 	outputDir := flag.String("output", "shutterfly_photos", "Output directory")
-	rateLimit := flag.Float64("rate-limit", 0.1, "Delay between requests (seconds)")
+	rateLimit := flag.Float64("rate-limit", 0.05, "Delay between requests per worker (seconds)")
+	workers := flag.Int("workers", 10, "Number of parallel download workers")
 	countOnly := flag.Bool("count", false, "Only count albums/photos")
 	verbose := flag.Bool("verbose", false, "Debug logging")
 	flag.Parse()
@@ -329,6 +335,14 @@ func main() {
 	accessToken := *token
 	if accessToken == "" {
 		accessToken = os.Getenv("SHUTTERFLY_TOKEN")
+	}
+	
+	libID := *libraryID
+	if libID == "" {
+		libID = os.Getenv("SHUTTERFLY_LIBRARY_ID")
+	}
+	if libID != "" {
+		os.Setenv("SHUTTERFLY_LIBRARY_ID", libID)
 	}
 	if accessToken == "" {
 		fmt.Print("Enter token: ")
@@ -347,7 +361,7 @@ func main() {
 		d.Count()
 	} else {
 		fmt.Println("Starting download...")
-		success, fail := d.DownloadAll()
+		success, fail := d.DownloadAll(*workers)
 		fmt.Printf("\nComplete! Success: %d, Failed: %d\n", success, fail)
 	}
 }

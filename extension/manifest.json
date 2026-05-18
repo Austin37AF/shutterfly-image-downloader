@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Shutterfly Token Grabber",
+  "version": "1.0",
+  "description": "Extract Shutterfly API token for downloading photos",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["https://*.shutterfly.com/*", "https://*.thislife.com/*"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [{
+    "matches": ["https://*.shutterfly.com/*"],
+    "js": ["content.js"],
+    "run_at": "document_start"
+  }]
+}
