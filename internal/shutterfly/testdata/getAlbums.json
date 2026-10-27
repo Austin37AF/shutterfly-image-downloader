@@ -1,0 +1,62 @@
+{
+ "result": {
+  "_explicitType": "ResponseWrapper",
+  "success": true,
+  "errors": null,
+  "message": "Success.",
+  "payload": [
+   [
+    {
+     "_explicitType": "StoryPermission",
+     "uid": "perm-1",
+     "story_uid": "story-111",
+     "life_uid": "000000000000",
+     "person_uid": "000000000000",
+     "first_name": "User",
+     "last_name": "Example",
+     "owner_person_uid": "000000000000",
+     "name": "User",
+     "accepted": true,
+     "view_only": false,
+     "follow": true,
+     "blocked": false,
+     "story": {
+      "_explicitType": "Story",
+      "uid": "story-111",
+      "life_uid": "000000000000",
+      "name": "Test",
+      "visible_moment_count": 14
+     },
+     "email_notification": true
+    },
+    {
+     "_explicitType": "StoryPermission",
+     "uid": "perm-2",
+     "story_uid": "story-222",
+     "life_uid": "000000000000",
+     "person_uid": "000000000000",
+     "first_name": "User",
+     "last_name": "Example",
+     "owner_person_uid": "000000000000",
+     "name": "User",
+     "accepted": true,
+     "view_only": false,
+     "follow": true,
+     "blocked": false,
+     "story": {
+      "_explicitType": "Story",
+      "uid": "story-222",
+      "life_uid": "000000000000",
+      "name": "test as well",
+      "visible_moment_count": 6
+     },
+     "email_notification": true
+    }
+   ],
+   [],
+   []
+  ]
+ },
+ "id": "",
+ "error": null
+}

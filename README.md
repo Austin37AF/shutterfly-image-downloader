@@ -116,3 +116,47 @@ After downloading, you can upload to Google Photos via Google Drive:
 - File modification dates are set from EXIF DateTimeOriginal when available
 - Photos without EXIF data will have today's date
 - The downloader is idempotent - safe to run multiple times
+## Album mode
+
+Download organized **albums** (the photo collections visible at
+https://photos.shutterfly.com) instead of the flat library search. Photos land
+in `output/<album name>/`, one directory per album. The album API (`cmd.thislife.com`)
+was ported from [JoshBurke/Shutterfly-Album-Downloader](https://github.com/JoshBurke/Shutterfly-Album-Downloader).
+
+### Getting the album-mode token
+
+Album mode uses a different token than library mode. To grab it:
+
+1. Log into https://photos.shutterfly.com
+2. Open DevTools → **Network** tab, filter by `cmd.thislife.com`
+3. Click on an album to trigger a request to
+   `cmd.thislife.com/json?method=album.getAlbums`
+4. The token is `params[0]` in the request payload (a URL-encoded string)
+5. On pre-2013 accounts, also copy `params[1]` — that's your user ID; pass it
+   via `-life-uid` or `LIFE_UID` (newer accounts leave it out; it's read from
+   the token claims)
+
+> ⚠️ Library mode and album mode may need tokens taken from different pages
+> (photos3.shutterfly.com vs photos.shutterfly.com). If your album token
+> expires mid-run, drop the new one into `token.txt` in the current directory
+> or paste it at the prompt — workers pause and continue with the new token.
+
+### Album-mode flags
+
+| Flag | Description |
+|---|---|
+| `-albums` | Download all albums |
+| `-album NAME` | Download a single album by exact name |
+| `-resume-from NAME` | With `-albums`, start at this album |
+| `-ignore-albums "A,B"` | Skip albums (also reads `output/ignore_albums.txt`); matches raw or sanitized name |
+| `-count` | With `-albums`: per-album photo counts and total |
+| `-compare` | Table of server vs local photo counts per album |
+| `-fix-incomplete` | Redownload albums missing photos (respects ignores) |
+| `-dedupe` | Remove identical `name_N.ext` duplicates in album dirs (keeps shorter name; no token needed) |
+| `-thorough` | With `-dedupe`: check all albums, not just over-count ones |
+| `-dry-run` | With `-dedupe`: show what would be removed without deleting |
+| `-retry` | With `-albums`: retry failures logged as `albumID\tmomentID` in `failed_downloads.txt` |
+
+Same-name photos are compared by content (SHA256, or pixel-for-pixel for
+JPEG/PNG): identical content is skipped, distinct content is saved as
+`name_N.ext`, so reruns are idempotent.
