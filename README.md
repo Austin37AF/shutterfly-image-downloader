@@ -172,7 +172,9 @@ nothing is written to disk except the state file.
 1. Create a Google Cloud project (console.cloud.google.com)
 2. Enable the **Photos Library API**
 3. Configure the OAuth consent screen: **External**, status **Testing**
-4. Add the Google Photos account's email as a **test user**
+4. Add ONLY the Google Photos account's email as a **test user** — Testing
+   status blocks every other Google account, which prevents signing into the
+   wrong one
 5. Create an OAuth client of type **Desktop app** and download its JSON to
    `~/.config/shutterfly/google-client.json`
 

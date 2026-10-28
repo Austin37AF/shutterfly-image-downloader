@@ -173,7 +173,9 @@ type TransferStats struct {
 }
 
 // ToGoogle runs the streaming transfer against the SQLite state DB.
-func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int, restrictTo string, dryRun bool) (*TransferStats, error) {
+// expectedEmail (if non-empty) is the -google-account guard; yes skips the
+// first-run confirmation only when expectedEmail also matches.
+func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int, restrictTo string, dryRun bool, expectedEmail string, yes bool) (*TransferStats, error) {
 	st, err := OpenStateDB(statePath)
 	if err != nil {
 		return nil, err
@@ -210,6 +212,31 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 
 	if g == nil {
 		return nil, fmt.Errorf("no Google client; provide -google-client and sign in")
+	}
+
+	// Account guard: must run before any album creation or upload.
+	if expectedEmail != "" && !strings.EqualFold(g.Email, expectedEmail) {
+		return nil, fmt.Errorf("signed in as %s, expected %s — delete ~/.config/shutterfly/google-token.json and sign in with %s",
+			g.Email, expectedEmail, expectedEmail)
+	}
+	if stored := st.metaGet("google_account"); stored != "" && !strings.EqualFold(g.Email, stored) {
+		return nil, fmt.Errorf("signed in as %s, but this transfer belongs to %s — delete ~/.config/shutterfly/google-token.json and sign in with %s (or use a fresh -google-state)",
+			g.Email, stored, stored)
+	}
+	if st.metaGet("google_account") == "" {
+		confirmed := yes && expectedEmail != ""
+		if !confirmed {
+			fmt.Printf("Signed in to Google as %s. Upload %d photos into this account? [y/N] ", g.Email, len(plan.moments))
+			var ans string
+			fmt.Fscan(c.Stdin, &ans)
+			confirmed = strings.EqualFold(strings.TrimSpace(ans), "y")
+		}
+		if !confirmed {
+			return nil, fmt.Errorf("aborted")
+		}
+		if err := st.metaSet("google_account", g.Email); err != nil {
+			return nil, err
+		}
 	}
 
 	// Load plan into DB (creates pending items + memberships).

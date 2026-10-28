@@ -2,6 +2,7 @@ package shutterfly
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -256,7 +257,10 @@ func TestPipelineDedupe(t *testing.T) {
 	c := NewClient(makeToken(3600, nil), t.TempDir(), 0, false)
 	c.LibraryBase, c.AlbumBase, c.DownloadBase = sf.URL, sf.URL, sf.URL
 	dbPath := filepath.Join(t.TempDir(), "s.db")
-	stats, err := c.ToGoogle(googleClientFor(fg.Server), dbPath, 4, 0, "", false)
+	g := googleClientFor(fg.Server)
+	g.Email = "t@t"
+	c.Stdin = strings.NewReader("y\n")
+	stats, err := c.ToGoogle(g, dbPath, 4, 0, "", false, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +416,10 @@ func TestResume(t *testing.T) {
 
 	c := NewClient(makeToken(3600, nil), t.TempDir(), 0, false)
 	c.LibraryBase, c.AlbumBase, c.DownloadBase = sf.URL, sf.URL, sf.URL
-	stats, err := c.ToGoogle(googleClientFor(fg.Server), dbPath, 2, 0, "", false)
+	g := googleClientFor(fg.Server)
+	g.Email = "t@t"
+	c.Stdin = strings.NewReader("y\n")
+	stats, err := c.ToGoogle(g, dbPath, 2, 0, "", false, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +451,10 @@ func TestQuotaStops(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "s.db")
 	c := NewClient(makeToken(3600, nil), t.TempDir(), 0, false)
 	c.LibraryBase, c.AlbumBase, c.DownloadBase = sf.URL, sf.URL, sf.URL
-	_, err := c.ToGoogle(googleClientFor(fg.Server), dbPath, 1, 0, "", false)
+	g := googleClientFor(fg.Server)
+	g.Email = "t@t"
+	c.Stdin = strings.NewReader("y\n")
+	_, err := c.ToGoogle(g, dbPath, 1, 0, "", false, "", false)
 	if err != ErrQuota {
 		t.Fatalf("got %v", err)
 	}
@@ -460,7 +470,7 @@ func TestDryRun(t *testing.T) {
 	c := NewClient(makeToken(3600, nil), t.TempDir(), 0, false)
 	c.LibraryBase, c.AlbumBase, c.DownloadBase = sf.URL, sf.URL, sf.URL
 	dbPath := filepath.Join(t.TempDir(), "s.db")
-	if _, err := c.ToGoogle(nil, dbPath, 1, 0, "", true); err != nil {
+	if _, err := c.ToGoogle(nil, dbPath, 1, 0, "", true, "", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(dbPath); err != nil {
@@ -611,5 +621,136 @@ func TestDupMembershipsSingleID(t *testing.T) {
 	}
 	if len(ids) != 1 || ids[0] != "mi-2" {
 		t.Fatalf("expected one distinct id, got %v", ids)
+	}
+}
+
+// --- account guard tests ---
+
+func makeIDToken(email string) string {
+	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"email":%q,"email_verified":true}`, email)))
+	return hdr + "." + payload + ".sig"
+}
+
+func TestEmailFromIDToken(t *testing.T) {
+	if got := emailFromIDToken(makeIDToken("Her@Example.com")); got != "Her@Example.com" {
+		t.Fatal(got)
+	}
+	if got := emailFromIDToken("garbage"); got != "" {
+		t.Fatal(got)
+	}
+}
+
+func TestUserinfoFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"email": "mom@example.com"})
+	}))
+	defer srv.Close()
+	g := &GoogleClient{BaseURL: srv.URL, UserinfoURL: srv.URL, hc: srv.Client()}
+	if err := g.resolveEmail(nil); err != nil {
+		t.Fatal(err)
+	}
+	if g.Email != "mom@example.com" {
+		t.Fatal(g.Email)
+	}
+}
+
+func toGoogleCall(c *Client, g *GoogleClient, dbPath string, expected string, yes bool, stdin string) error {
+	c.Stdin = strings.NewReader(stdin)
+	return func() error {
+		_, err := c.ToGoogle(g, dbPath, 1, 0, "", false, expected, yes)
+		return err
+	}()
+}
+
+func mkClients(t *testing.T) (*Client, *fakeGoogle) {
+	var downloads sync.Map
+	sf := fakeShutterfly(t, []string{"001"}, map[string][]string{}, &downloads)
+	fg := newFakeGoogle(t)
+	c := NewClient(makeToken(3600, nil), t.TempDir(), 0, false)
+	c.LibraryBase, c.AlbumBase, c.DownloadBase = sf.URL, sf.URL, sf.URL
+	return c, fg
+}
+
+// flag mismatch refuses before any album/upload request
+func TestAccountFlagMismatch(t *testing.T) {
+	c, fg := mkClients(t)
+	g := googleClientFor(fg.Server)
+	g.Email = "someone@else.com"
+	err := toGoogleCall(c, g, filepath.Join(t.TempDir(), "s.db"), "mom@example.com", false, "y\n")
+	if err == nil || !strings.Contains(err.Error(), "signed in as someone@else.com, expected mom@example.com") {
+		t.Fatalf("%v", err)
+	}
+	if len(fg.createCalls) != 0 || fg.uploadN != 0 {
+		t.Fatal("made Google calls before refusal")
+	}
+}
+
+// stored-meta mismatch refuses
+func TestStoredAccountMismatch(t *testing.T) {
+	c, _ := mkClients(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "s.db")
+	st, _ := OpenStateDB(dbPath)
+	st.metaSet("google_account", "mom@example.com")
+	st.Close()
+	g := googleClientFor(newFakeGoogle(t).Server)
+	g.Email = "other@example.com"
+	err := toGoogleCall(c, g, dbPath, "", true, "y\n")
+	if err == nil || !strings.Contains(err.Error(), "belongs to mom@example.com") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// first-run prompt: n aborts, y proceeds and stores
+func TestFirstRunPrompt(t *testing.T) {
+	// 'n' aborts
+	c, fg := mkClients(t)
+	g := googleClientFor(fg.Server)
+	g.Email = "mom@example.com"
+	dir := t.TempDir()
+	err := toGoogleCall(c, g, filepath.Join(dir, "s.db"), "", false, "n\n")
+	if err == nil {
+		t.Fatal("expected abort")
+	}
+	if len(fg.createCalls) != 0 {
+		t.Fatal("albums created despite abort")
+	}
+
+	// 'y' proceeds and stores the account
+	c2, fg2 := mkClients(t)
+	g2 := googleClientFor(fg2.Server)
+	g2.Email = "mom@example.com"
+	dbPath := filepath.Join(t.TempDir(), "s.db")
+	err = toGoogleCall(c2, g2, dbPath, "", false, "y\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := OpenStateDB(dbPath)
+	defer st.Close()
+	if st.metaGet("google_account") != "mom@example.com" {
+		t.Fatal("account not stored")
+	}
+}
+
+// -yes without -google-account still prompts
+func TestYesWithoutAccountStillPrompts(t *testing.T) {
+	c, _ := mkClients(t)
+	g := googleClientFor(newFakeGoogle(t).Server)
+	g.Email = "mom@example.com"
+	err := toGoogleCall(c, g, filepath.Join(t.TempDir(), "s.db"), "", true, "n\n")
+	if err == nil {
+		t.Fatal("expected abort — yes without account must still prompt")
+	}
+}
+
+// -yes + -google-account match skips prompt
+func TestYesWithAccountSkipsPrompt(t *testing.T) {
+	c, _ := mkClients(t)
+	g := googleClientFor(newFakeGoogle(t).Server)
+	g.Email = "Mom@Example.com"
+	err := toGoogleCall(c, g, filepath.Join(t.TempDir(), "s.db"), "mom@example.com", true, "")
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
 }

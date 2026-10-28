@@ -76,6 +76,18 @@ func OpenStateDB(path string) (*StateDB, error) {
 	return &StateDB{db: db, path: path, lockFile: lf}, nil
 }
 
+func (s *StateDB) metaGet(key string) string {
+	var v string
+	s.db.QueryRow(`SELECT value FROM meta WHERE key=?`, key).Scan(&v)
+	return v
+}
+
+func (s *StateDB) metaSet(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO meta(key,value) VALUES(?,?)
+	  ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
+}
+
 func (s *StateDB) Close() {
 	if s.db != nil {
 		s.db.Close()
@@ -385,6 +397,9 @@ func (s *StateDB) Status() error {
 		counts[st] = n
 	}
 	rows.Close()
+	if acct := s.metaGet("google_account"); acct != "" {
+		fmt.Printf("Google account: %s\n", acct)
+	}
 	fmt.Println("Transfer status:")
 	for _, st := range []string{"pending", "creating", "done", "failed"} {
 		fmt.Printf("  %-9s %d\n", st+":", counts[st])

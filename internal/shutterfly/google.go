@@ -3,6 +3,7 @@ package shutterfly
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +27,11 @@ var googleScopes = []string{
 	"https://www.googleapis.com/auth/photoslibrary.appendonly",
 	"https://www.googleapis.com/auth/photoslibrary.edit.appcreateddata",
 	"https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata",
+	"openid",
+	"email",
 }
+
+const googleUserinfoURL = "https://openidconnect.googleapis.com/v1/userinfo"
 
 // ErrQuota is returned on HTTP 429: the daily Photos Library API quota is
 // exhausted. Callers should save state and exit non-zero.
@@ -35,10 +40,12 @@ var ErrQuota = errors.New("google photos quota reached")
 // GoogleClient wraps the Photos Library API over an OAuth2-authenticated
 // http.Client. BaseURL is configurable for httptest.
 type GoogleClient struct {
-	BaseURL    string
-	hc         *http.Client
-	verbose    bool
-	maxRetries int
+	BaseURL     string
+	UserinfoURL string // override for tests; empty = googleUserinfoURL
+	Email       string // resolved after auth
+	hc          *http.Client
+	verbose     bool
+	maxRetries  int
 }
 
 func (g *GoogleClient) log(format string, args ...interface{}) {
@@ -313,6 +320,79 @@ func (s *persistTokenSource) Token() (*oauth2.Token, error) {
 	return t, nil
 }
 
+// emailFromIDToken reads the email claim from a Google id_token JWT. The
+// token came straight from Google's token endpoint over TLS, so signature
+// verification isn't required here.
+func emailFromIDToken(idToken string) string {
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Email         string `json:"email"`
+		EmailVerified bool   `json:"email_verified"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	if !claims.EmailVerified {
+		return ""
+	}
+	return claims.Email
+}
+
+// emailFromUserinfo calls the OpenID userinfo endpoint with the access token.
+func (g *GoogleClient) emailFromUserinfo() (string, error) {
+	u := g.UserinfoURL
+	if u == "" {
+		u = googleUserinfoURL
+	}
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := g.hc.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("userinfo: %d", resp.StatusCode)
+	}
+	var out struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	return out.Email, nil
+}
+
+// resolveEmail sets g.Email from the token's id_token claim, else userinfo.
+func (g *GoogleClient) resolveEmail(tok *oauth2.Token) error {
+	if tok != nil {
+		if idt, _ := tok.Extra("id_token").(string); idt != "" {
+			if email := emailFromIDToken(idt); email != "" {
+				g.Email = email
+				return nil
+			}
+		}
+	}
+	email, err := g.emailFromUserinfo()
+	if err != nil {
+		return err
+	}
+	if email == "" {
+		return fmt.Errorf("Google did not return an account email")
+	}
+	g.Email = email
+	return nil
+}
+
 func saveTokenFile(path string, t *oauth2.Token) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
@@ -328,25 +408,27 @@ func saveTokenFile(path string, t *oauth2.Token) error {
 	return os.Rename(tmp, path)
 }
 
-// loadOrAuthorize returns an OAuth2 http.Client: loads the saved token if any,
-// otherwise runs the loopback+PKCE consent flow.
-func loadOrAuthorize(cfg *oauth2.Config, tokenPath string) (*http.Client, bool, error) {
+// loadOrAuthorize returns an OAuth2 http.Client plus the current token (for
+// id_token claims): loads the saved token if any, otherwise runs the
+// loopback+PKCE consent flow.
+func loadOrAuthorize(cfg *oauth2.Config, tokenPath string) (*http.Client, *oauth2.Token, error) {
 	data, err := os.ReadFile(tokenPath)
 	if err == nil {
 		var tok oauth2.Token
 		if json.Unmarshal(data, &tok) == nil && tok.AccessToken != "" {
 			src := &persistTokenSource{path: tokenPath, src: cfg.TokenSource(context.Background(), &tok)}
-			return oauth2.NewClient(context.Background(), src), true, nil
+			t, err := src.Token()
+			return oauth2.NewClient(context.Background(), src), t, err
 		}
 	}
 	if !os.IsNotExist(err) {
-		return nil, false, err
+		return nil, nil, err
 	}
 
 	// Loopback flow on a random port.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
 	defer l.Close()
 	port := l.Addr().(*net.TCPAddr).Port
@@ -389,9 +471,9 @@ func loadOrAuthorize(cfg *oauth2.Config, tokenPath string) (*http.Client, bool, 
 	select {
 	case code = <-codeCh:
 	case err := <-errCh:
-		return nil, false, err
+		return nil, nil, err
 	case <-time.After(5 * time.Minute):
-		return nil, false, fmt.Errorf("timed out waiting for authorization")
+		return nil, nil, fmt.Errorf("timed out waiting for authorization")
 	}
 
 	tok, err := cfg.Exchange(context.Background(), code,
@@ -399,13 +481,13 @@ func loadOrAuthorize(cfg *oauth2.Config, tokenPath string) (*http.Client, bool, 
 		oauth2.SetAuthURLParam("redirect_uri", redirect),
 	)
 	if err != nil {
-		return nil, false, fmt.Errorf("token exchange: %w", err)
+		return nil, nil, fmt.Errorf("token exchange: %w", err)
 	}
 	if err := saveTokenFile(tokenPath, tok); err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
 	src := &persistTokenSource{path: tokenPath, src: cfg.TokenSource(context.Background(), tok), last: tok}
-	return oauth2.NewClient(context.Background(), src), true, nil
+	return oauth2.NewClient(context.Background(), src), tok, nil
 }
 
 // NewGoogleClient loads the OAuth client config and produces an authenticated
@@ -415,9 +497,13 @@ func NewGoogleClient(clientPath, tokenPath string, verbose bool) (*GoogleClient,
 	if err != nil {
 		return nil, fmt.Errorf("can't read Google client JSON: %w\nDownload it from Google Cloud (see README) to %s", err, clientPath)
 	}
-	hc, _, err := loadOrAuthorize(cfg, tokenPath)
+	hc, tok, err := loadOrAuthorize(cfg, tokenPath)
 	if err != nil {
 		return nil, err
 	}
-	return &GoogleClient{BaseURL: googleAPIBase, hc: hc, verbose: verbose, maxRetries: 3}, nil
+	g := &GoogleClient{BaseURL: googleAPIBase, hc: hc, verbose: verbose, maxRetries: 3}
+	if err := g.resolveEmail(tok); err != nil {
+		return nil, fmt.Errorf("resolving Google account email: %w", err)
+	}
+	return g, nil
 }

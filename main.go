@@ -37,6 +37,8 @@ func main() {
 	refreshTest := flag.Bool("refresh-test", false, "Test the Cognito token refresh and exit")
 	statusFlag := flag.Bool("status", false, "Print transfer status from the state DB and exit")
 	reconcileFlag := flag.Bool("reconcile", false, "Reconcile items left 'creating' by a crash and exit")
+	googleAccount := flag.String("google-account", "", "Expected Google account email; refuses to run if signed in differently")
+	yesFlag := flag.Bool("yes", false, "Skip the first-run account confirmation (requires -google-account)")
 	flag.Parse()
 
 	accessToken := *token
@@ -152,7 +154,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		stats, err := d.ToGoogle(g, statePath, *workers, *limit, *album, *dryRun)
+		stats, err := d.ToGoogle(g, statePath, *workers, *limit, *album, *dryRun, *googleAccount, *yesFlag)
 		if err != nil {
 			if stats == nil {
 				fmt.Println("Error:", err)
