@@ -54,14 +54,15 @@ func main() {
 		os.Setenv("SHUTTERFLY_LIBRARY_ID", libID)
 	}
 
-	// Dedupe is the only mode that works without a token.
-	if accessToken == "" && !*dedupe {
+	// Dedupe, -status and -reconcile work without a Shutterfly token.
+	needsToken := !*dedupe && !*statusFlag && !*reconcileFlag
+	if accessToken == "" && needsToken {
 		fmt.Print("Enter token: ")
 		reader := bufio.NewReader(os.Stdin)
 		accessToken, _ = reader.ReadString('\n')
 		accessToken = strings.TrimSpace(accessToken)
 	}
-	if accessToken == "" && !*dedupe {
+	if accessToken == "" && needsToken {
 		fmt.Println("Error: token required")
 		os.Exit(1)
 	}

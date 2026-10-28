@@ -435,7 +435,8 @@ func loadOrAuthorize(cfg *oauth2.Config, tokenPath string) (*http.Client, *oauth
 	redirect := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
 	verifier := oauth2.GenerateVerifier()
-	authURL := cfg.AuthCodeURL("state",
+	state := oauth2.GenerateVerifier() // random; checked on the callback
+	authURL := cfg.AuthCodeURL(state,
 		oauth2.AccessTypeOffline,
 		oauth2.S256ChallengeOption(verifier),
 		oauth2.SetAuthURLParam("prompt", "consent select_account"),
@@ -449,12 +450,22 @@ func loadOrAuthorize(cfg *oauth2.Config, tokenPath string) (*http.Client, *oauth
 			http.NotFound(w, r)
 			return
 		}
+		if r.URL.Query().Get("state") != state {
+			http.Error(w, "state mismatch", http.StatusBadRequest)
+			return
+		}
 		if e := r.URL.Query().Get("error"); e != "" {
-			errCh <- fmt.Errorf("oauth error: %s", e)
+			select {
+			case errCh <- fmt.Errorf("oauth error: %s", e):
+			default:
+			}
 			fmt.Fprintln(w, "Authorization failed. You can close this tab.")
 			return
 		}
-		codeCh <- r.URL.Query().Get("code")
+		select {
+		case codeCh <- r.URL.Query().Get("code"):
+		default:
+		}
 		fmt.Fprintln(w, "Authorization received. You can close this tab and return to the terminal.")
 	})}
 	go srv.Serve(l)
