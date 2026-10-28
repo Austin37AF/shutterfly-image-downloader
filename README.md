@@ -101,14 +101,9 @@ go run verify.go "TOKEN" "LIBRARY_ID" ~/Pictures/Shutterfly
 
 ## Uploading to Google Photos
 
-After downloading, you can upload to Google Photos via Google Drive:
-
-1. Move/copy your downloaded photos to Google Drive (or a synced folder)
-2. Go to [Google Photos Settings](https://photos.google.com/settings)
-3. Enable **"Google Drive - Sync photos & videos from Drive to Google Photos"**
-4. Photos in Drive will automatically appear in Google Photos
-
-> **Tip:** Google Photos will use the file modification dates (preserved from EXIF) to organize photos chronologically.
+Google removed the Drive → Photos sync, so use the built-in transfer instead:
+see [Google Photos transfer](#google-photos-transfer). It streams straight from
+Shutterfly to Google Photos without keeping local copies.
 
 ## Notes
 
@@ -137,7 +132,12 @@ Album mode uses a different token than library mode. To grab it:
    `SHUTTERFLY_LIBRARY_ID` and then the token claims — for some accounts the
    album API's user ID is the library ID.
 
-> ⚠️ Library mode and album mode may need tokens taken from different pages
+> Tested 2026-10: the `Authorization: Bearer` token from photos3.shutterfly.com
+> works for both library and album mode. The library ID (and album-mode user
+> ID) can be found in the `searchMoments` response's face thumbnail URLs
+> (`.../face/<library id>/image/...`); set it as `SHUTTERFLY_LIBRARY_ID`.
+>
+> ⚠️ Older accounts may still need tokens taken from different pages
 > (photos3.shutterfly.com vs photos.shutterfly.com). If your album token
 > expires mid-run, drop the new one into `token.txt` in the current directory
 > or paste it at the prompt — workers pause and continue with the new token.
@@ -185,22 +185,40 @@ nothing is written to disk except the state file.
 ### Commands
 
 ```bash
-./shutterfly-downloader -to-google -dry-run      # print the plan (no Google calls)
-./shutterfly-downloader -to-google -album Gunner # small test first
-./shutterfly-downloader -to-google               # full transfer
+export SHUTTERFLY_TOKEN="$(cat token.tmp)" SHUTTERFLY_LIBRARY_ID=<library id>
+./shutterfly-downloader -to-google -dry-run                                  # plan only (no Google calls)
+./shutterfly-downloader -to-google -album Gunner -google-account you@gmail.com # small test first
+./shutterfly-downloader -to-google -google-account you@gmail.com              # full transfer (re-run daily)
+./shutterfly-downloader -status                                              # progress (no tokens needed)
 ```
 
 Flags: `-workers` (default 10), `-limit N`, `-dry-run`, `-album NAME`,
-`-google-client`, `-google-state`.
+`-google-account EMAIL`, `-yes`, `-google-client`, `-google-state`,
+`-status`, `-reconcile`.
+
+### Making sure it's the right Google account
+
+- Sign-in always shows Google's account picker; Testing mode only allows the
+  test users you listed.
+- The tool prints `Signed in to Google as <email>` and asks for `y` before the
+  first upload (`-yes` skips this only together with a matching
+  `-google-account`).
+- `-google-account` refuses to run if a different account is signed in.
+- The confirmed account is pinned in the state DB; later runs signed into
+  another account stop before uploading.
+- To switch accounts on purpose: delete `~/.config/shutterfly/google-token.json`
+  and use a new `-google-state` file (album/media IDs are per account).
 
 Behavior:
 - Every photo goes into a Google album `Shutterfly` (rolls over to
   `Shutterfly (2)` past 20,000 items). Each non-empty Shutterfly album also
   gets `Shutterfly - <name>`.
 - Photos upload once; album membership uses `batchAddMediaItems`.
-- Resume: `~/.config/shutterfly/google-state.json` records uploaded items and
-  memberships; re-running skips done items and fills missing memberships.
-  Lost state recovers album IDs by title. Failed IDs go to `google-failed.txt`.
+- Resume: the state DB (below) records uploaded items and memberships;
+  re-running skips done items and fills missing memberships. Lost state
+  recovers album IDs by title. Failed IDs go to `google-failed.txt`.
+- Shutterfly tokens last ~23h: when one expires mid-run, save a fresh one to
+  `token.txt` in the current directory or paste it at the prompt.
 - Uploads count against the target account's Google storage; total bytes are
   printed at the end.
 
