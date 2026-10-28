@@ -151,11 +151,38 @@ func extractExifDate(data []byte) time.Time {
 	if err != nil {
 		return time.Time{}
 	}
-	t, err := x.DateTime()
-	if err != nil {
+	if t, err := x.DateTime(); err == nil {
+		return t
+	}
+	// Some cameras write out-of-range fields (e.g. seconds "64") that the
+	// strict parser rejects; fall back to a lenient parse of the raw tags.
+	for _, name := range []exif.FieldName{exif.DateTimeOriginal, exif.DateTime} {
+		tag, err := x.Get(name)
+		if err != nil {
+			continue
+		}
+		s, err := tag.StringVal()
+		if err != nil {
+			continue
+		}
+		if t := parseExifDateLenient(s); !t.IsZero() {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+// parseExifDateLenient parses "YYYY:MM:DD HH:MM:SS", clamping out-of-range
+// time fields instead of rejecting the value.
+func parseExifDateLenient(s string) time.Time {
+	var y, mo, d, h, mi, sec int
+	if n, _ := fmt.Sscanf(strings.TrimSpace(s), "%d:%d:%d %d:%d:%d", &y, &mo, &d, &h, &mi, &sec); n != 6 {
 		return time.Time{}
 	}
-	return t
+	if y < 1900 || mo < 1 || mo > 12 || d < 1 || d > 31 {
+		return time.Time{}
+	}
+	return time.Date(y, time.Month(mo), d, min(max(h, 0), 23), min(max(mi, 0), 59), min(max(sec, 0), 59), 0, time.Local)
 }
 
 func (c *Client) DownloadAll(workers int) (int, int) {

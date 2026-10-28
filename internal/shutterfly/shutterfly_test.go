@@ -459,3 +459,21 @@ func TestTokenRefreshConcurrent(t *testing.T) {
 		}
 	}
 }
+
+func TestParseExifDateLenient(t *testing.T) {
+	cases := []struct {
+		in   string
+		want time.Time
+	}{
+		{"2020:10:15 17:10:64", time.Date(2020, 10, 15, 17, 10, 59, 0, time.Local)},
+		{"2020:11:06 13:11:75", time.Date(2020, 11, 6, 13, 11, 59, 0, time.Local)},
+		{"2014:06:07 16:40:16", time.Date(2014, 6, 7, 16, 40, 16, 0, time.Local)},
+		{"0000:00:00 00:00:00", time.Time{}},
+		{"garbage", time.Time{}},
+	}
+	for _, c := range cases {
+		if got := parseExifDateLenient(c.in); !got.Equal(c.want) {
+			t.Errorf("parseExifDateLenient(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
