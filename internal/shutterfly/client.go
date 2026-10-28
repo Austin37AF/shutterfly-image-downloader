@@ -137,12 +137,17 @@ func parseToken(token string) (map[string]interface{}, time.Time) {
 }
 
 // userID resolves the Shutterfly user ID: -life-uid flag, then LIFE_UID env,
-// then token claims (sfly3_uid preferred, then sfly_uid).
+// then SHUTTERFLY_LIBRARY_ID env, then token claims (sfly3_uid preferred,
+// then sfly_uid). The library-ID fallback covers accounts where the album
+// API's user ID is the library ID and neither claim is present.
 func (c *Client) userID() string {
 	if c.LifeUID != "" {
 		return c.LifeUID
 	}
 	if uid := os.Getenv("LIFE_UID"); uid != "" {
+		return uid
+	}
+	if uid := os.Getenv("SHUTTERFLY_LIBRARY_ID"); uid != "" {
 		return uid
 	}
 	c.mu.Lock()

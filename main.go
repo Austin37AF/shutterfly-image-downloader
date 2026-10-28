@@ -28,7 +28,11 @@ func main() {
 	fixIncomplete := flag.Bool("fix-incomplete", false, "Redownload albums with missing photos")
 	dedupe := flag.Bool("dedupe", false, "Find and remove exact duplicate photos in album dirs (no token needed)")
 	thorough := flag.Bool("thorough", false, "With -dedupe: check all albums even if counts match")
-	dryRun := flag.Bool("dry-run", false, "With -dedupe: print what would be removed without deleting")
+	dryRun := flag.Bool("dry-run", false, "With -dedupe or -to-google: print what would happen without doing it")
+	toGoogle := flag.Bool("to-google", false, "Transfer all photos to Google Photos (streaming, resumable)")
+	googleClient := flag.String("google-client", "", "Google OAuth client JSON (default ~/.config/shutterfly/google-client.json)")
+	googleState := flag.String("google-state", "", "Transfer state file (default ~/.config/shutterfly/google-state.json)")
+	limit := flag.Int("limit", 0, "Limit number of moments transferred (0 = all)")
 	flag.Parse()
 
 	accessToken := *token
@@ -78,6 +82,31 @@ func main() {
 	case *fixIncomplete:
 		fmt.Println("\nStarting redownload of incomplete albums...")
 		d.RedownloadIncompleteAlbums(*workers)
+	case *toGoogle:
+		clientPath := *googleClient
+		if clientPath == "" {
+			clientPath = os.Getenv("HOME") + "/.config/shutterfly/google-client.json"
+		}
+		statePath := *googleState
+		if statePath == "" {
+			statePath = os.Getenv("HOME") + "/.config/shutterfly/google-state.json"
+		}
+		var g *shutterfly.GoogleClient
+		if !*dryRun {
+			var err error
+			g, err = shutterfly.NewGoogleClient(clientPath, os.Getenv("HOME")+"/.config/shutterfly/google-token.json", *verbose)
+			if err != nil {
+				fmt.Println("Error:", err)
+				os.Exit(1)
+			}
+		}
+		stats, err := d.ToGoogle(g, statePath, *workers, *limit, *album, *dryRun)
+		if err != nil {
+			if stats == nil {
+				fmt.Println("Error:", err)
+			}
+			os.Exit(1)
+		}
 	case *album != "":
 		fmt.Println("\nStarting single album download...")
 		success, fail := d.DownloadSingleAlbum(*album, *workers)

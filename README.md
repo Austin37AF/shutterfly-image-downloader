@@ -133,8 +133,9 @@ Album mode uses a different token than library mode. To grab it:
    `cmd.thislife.com/json?method=album.getAlbums`
 4. The token is `params[0]` in the request payload (a URL-encoded string)
 5. On pre-2013 accounts, also copy `params[1]` — that's your user ID; pass it
-   via `-life-uid` or `LIFE_UID` (newer accounts leave it out; it's read from
-   the token claims)
+   via `-life-uid` or `LIFE_UID`. When unset, the user ID falls back to
+   `SHUTTERFLY_LIBRARY_ID` and then the token claims — for some accounts the
+   album API's user ID is the library ID.
 
 > ⚠️ Library mode and album mode may need tokens taken from different pages
 > (photos3.shutterfly.com vs photos.shutterfly.com). If your album token
@@ -160,3 +161,47 @@ Album mode uses a different token than library mode. To grab it:
 Same-name photos are compared by content (SHA256, or pixel-for-pixel for
 JPEG/PNG): identical content is skipped, distinct content is saved as
 `name_N.ext`, so reruns are idempotent.
+
+## Google Photos transfer
+
+Stream the whole library (and per-album copies) to a Google Photos account —
+nothing is written to disk except the state file.
+
+### One-time setup
+
+1. Create a Google Cloud project (console.cloud.google.com)
+2. Enable the **Photos Library API**
+3. Configure the OAuth consent screen: **External**, status **Testing**
+4. Add the Google Photos account's email as a **test user**
+5. Create an OAuth client of type **Desktop app** and download its JSON to
+   `~/.config/shutterfly/google-client.json`
+
+> ⚠️ In Testing status, refresh tokens expire after 7 days — a long transfer
+> may need re-consent on a later run. Quota is 10,000 requests/day; a 429
+> stops cleanly and `re-run tomorrow` resumes from state.
+
+### Commands
+
+```bash
+./shutterfly-downloader -to-google -dry-run      # print the plan (no Google calls)
+./shutterfly-downloader -to-google -album Gunner # small test first
+./shutterfly-downloader -to-google               # full transfer
+```
+
+Flags: `-workers` (default 10), `-limit N`, `-dry-run`, `-album NAME`,
+`-google-client`, `-google-state`.
+
+Behavior:
+- Every photo goes into a Google album `Shutterfly` (rolls over to
+  `Shutterfly (2)` past 20,000 items). Each non-empty Shutterfly album also
+  gets `Shutterfly - <name>`.
+- Photos upload once; album membership uses `batchAddMediaItems`.
+- Resume: `~/.config/shutterfly/google-state.json` records uploaded items and
+  memberships; re-running skips done items and fills missing memberships.
+  Lost state recovers album IDs by title. Failed IDs go to `google-failed.txt`.
+- Uploads count against the target account's Google storage; total bytes are
+  printed at the end.
+
+Note: if `LIFE_UID` isn't set, album mode falls back to
+`SHUTTERFLY_LIBRARY_ID` before token claims — needed for accounts where the
+album API's user ID is the library ID.
