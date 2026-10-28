@@ -205,3 +205,25 @@ Behavior:
 Note: if `LIFE_UID` isn't set, album mode falls back to
 `SHUTTERFLY_LIBRARY_ID` before token claims — needed for accounts where the
 album API's user ID is the library ID.
+
+### State, locking and safety
+
+- Transfer state lives in SQLite at `~/.config/shutterfly/google-state.db`
+  (`-google-state`). Tables: `albums`, `items` (pending/creating/done/failed
+  with media_item_id, sha256, attempts), `memberships`, `meta`.
+- An exclusive flock (`<db>.lock`) prevents concurrent runs.
+- `-status` prints counts/bytes/album progress/failures from the DB only.
+- `-reconcile` repairs items left `creating` by a crash around batchCreate
+  (matches by filename against app-created mediaItems; ambiguous cases are
+  reported for manual check and never re-uploaded).
+- Duplicates: identical bytes (sha256) upload only once — the second item
+  links to the same media item. batchCreate items are marked `creating`
+  before the call and `done`/`pending` after, so a crash mid-call is safe.
+- Shutterfly token auto-refresh: the ID token is a Cognito token. Save your
+  refresh token (DevTools → Application → Local Storage → key ending
+  `.refreshToken`) to `~/.config/shutterfly/refresh-token` with `chmod 600`;
+  it's used when the token is within 10 min of expiry. `-refresh-test` checks
+  it once. Files with looser perms are refused.
+  > Note: Cognito auto-refresh is currently blocked by Shutterfly's AWS WAF
+  > (403 ForbiddenException from this network), so the token.txt/stdin prompt
+  > fallback is the supported path. No WAF-evasion is attempted.

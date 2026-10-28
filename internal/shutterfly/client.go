@@ -43,6 +43,8 @@ type Client struct {
 	MaxRetries   int
 	Verbose      bool
 	LifeUID      string    // -life-uid override
+	RefreshFile  string    // Cognito refresh token file (0600)
+	CognitoBase  string    // override Cognito endpoint (tests)
 	IgnoreAlbums []string  // -ignore-albums names (matched raw or sanitized)
 	TokenFile    string    // file consulted when refreshing the token (default "token.txt")
 	Stdin        io.Reader // for the token prompt (default os.Stdin)
@@ -169,6 +171,19 @@ func (c *Client) userID() string {
 func (c *Client) ensureToken() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Try a Cognito refresh when expired or within 10 min of expiry.
+	if c.RefreshFile != "" && time.Now().Add(10*time.Minute).After(c.expiry) {
+		if _, statErr := os.Stat(c.RefreshFile); statErr == nil {
+			if tok, _, err := c.refreshViaCognitoLocked(); err == nil && tok != "" {
+				c.setTokenLocked(tok)
+				fmt.Println("Access token refreshed via Cognito")
+				return nil
+			} else if err != nil {
+				fmt.Println("refresh failed:", err)
+			}
+		}
+	}
 
 	if time.Now().Before(c.expiry) {
 		return nil

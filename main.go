@@ -33,6 +33,10 @@ func main() {
 	googleClient := flag.String("google-client", "", "Google OAuth client JSON (default ~/.config/shutterfly/google-client.json)")
 	googleState := flag.String("google-state", "", "Transfer state file (default ~/.config/shutterfly/google-state.json)")
 	limit := flag.Int("limit", 0, "Limit number of moments transferred (0 = all)")
+	shutterflyRefresh := flag.String("shutterfly-refresh", "", "Cognito refresh token file (default ~/.config/shutterfly/refresh-token)")
+	refreshTest := flag.Bool("refresh-test", false, "Test the Cognito token refresh and exit")
+	statusFlag := flag.Bool("status", false, "Print transfer status from the state DB and exit")
+	reconcileFlag := flag.Bool("reconcile", false, "Reconcile items left 'creating' by a crash and exit")
 	flag.Parse()
 
 	accessToken := *token
@@ -62,6 +66,11 @@ func main() {
 
 	d := shutterfly.NewClient(accessToken, *outputDir, *rateLimit, *verbose)
 	d.LifeUID = *lifeUID
+	if *shutterflyRefresh != "" {
+		d.RefreshFile = *shutterflyRefresh
+	} else {
+		d.RefreshFile = os.Getenv("HOME") + "/.config/shutterfly/refresh-token"
+	}
 	if *ignoreAlbums != "" {
 		for _, name := range strings.Split(*ignoreAlbums, ",") {
 			if name = strings.TrimSpace(name); name != "" {
@@ -82,6 +91,49 @@ func main() {
 	case *fixIncomplete:
 		fmt.Println("\nStarting redownload of incomplete albums...")
 		d.RedownloadIncompleteAlbums(*workers)
+	case *refreshTest:
+		if err := d.RefreshTest(); err != nil {
+			os.Exit(1)
+		}
+	case *statusFlag:
+		statePath := *googleState
+		if statePath == "" {
+			statePath = os.Getenv("HOME") + "/.config/shutterfly/google-state.db"
+		}
+		st, err := shutterfly.OpenStateDB(statePath)
+		if err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+		defer st.Close()
+		if err := st.Status(); err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+	case *reconcileFlag:
+		statePath := *googleState
+		if statePath == "" {
+			statePath = os.Getenv("HOME") + "/.config/shutterfly/google-state.db"
+		}
+		st, err := shutterfly.OpenStateDB(statePath)
+		if err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+		defer st.Close()
+		clientPath := *googleClient
+		if clientPath == "" {
+			clientPath = os.Getenv("HOME") + "/.config/shutterfly/google-client.json"
+		}
+		g, err := shutterfly.NewGoogleClient(clientPath, os.Getenv("HOME")+"/.config/shutterfly/google-token.json", *verbose)
+		if err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+		if err := shutterfly.Reconcile(g, st); err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
 	case *toGoogle:
 		clientPath := *googleClient
 		if clientPath == "" {
@@ -89,7 +141,7 @@ func main() {
 		}
 		statePath := *googleState
 		if statePath == "" {
-			statePath = os.Getenv("HOME") + "/.config/shutterfly/google-state.json"
+			statePath = os.Getenv("HOME") + "/.config/shutterfly/google-state.db"
 		}
 		var g *shutterfly.GoogleClient
 		if !*dryRun {

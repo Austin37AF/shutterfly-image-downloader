@@ -226,6 +226,36 @@ func (g *GoogleClient) listAlbums() (map[string]string, error) {
 	return albums, nil
 }
 
+// listMediaItems pages app-created media items (readonly.appcreateddata).
+// Returns (id, filename) pairs and the next page token.
+func (g *GoogleClient) listMediaItems(pageToken string) ([]struct{ ID, FileName string }, string, error) {
+	path := "/v1/mediaItems?pageSize=100"
+	if pageToken != "" {
+		path += "&pageToken=" + url.QueryEscape(pageToken)
+	}
+	resp, err := g.do("GET", path, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		MediaItems []struct {
+			ID       string `json:"id"`
+			FileName string `json:"filename"`
+		} `json:"mediaItems"`
+		NextPageToken string `json:"nextPageToken"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, "", err
+	}
+	items := make([]struct{ ID, FileName string }, len(result.MediaItems))
+	for i, m := range result.MediaItems {
+		items[i].ID = m.ID
+		items[i].FileName = m.FileName
+	}
+	return items, result.NextPageToken, nil
+}
+
 // ---------------------------------------------------------------------------
 // OAuth (installed-app loopback flow with PKCE)
 

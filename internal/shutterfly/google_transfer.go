@@ -1,71 +1,28 @@
 package shutterfly
 
 import (
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
-
-// ---------------------------------------------------------------------------
-// State file
-
-// GoogleState records created Google albums and per-moment results so runs
-// are resumable.
-type GoogleState struct {
-	Albums map[string]string          `json:"albums"` // google album title -> album id
-	Items  map[string]GoogleItemState `json:"items"`  // normalized momentID -> result
-}
-
-type GoogleItemState struct {
-	MediaItemID string   `json:"mediaItemId"`
-	Albums      []string `json:"albums"` // google album titles the item belongs to
-}
-
-func loadGoogleState(path string) *GoogleState {
-	s := &GoogleState{Albums: map[string]string{}, Items: map[string]GoogleItemState{}}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return s
-	}
-	// Corrupt state is safer ignored than half-applied.
-	if err := json.Unmarshal(data, s); err != nil {
-		fmt.Printf("warning: ignoring unreadable state file %s: %v\n", path, err)
-	}
-	return s
-}
-
-func (s *GoogleState) save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
 
 // ---------------------------------------------------------------------------
 // Plan
 
 type transferPlan struct {
 	moments   []string            // normalized moment IDs, library order
-	albums    map[string][]string // normalized momentID -> google album titles to add (besides master)
-	albumMeta []googleAlbumMeta   // per Google album: title -> member momentIDs
+	albums    map[string][]string // normalized momentID -> google album titles (besides master)
+	albumMeta []googleAlbumMeta
 }
 
 type googleAlbumMeta struct {
@@ -73,28 +30,20 @@ type googleAlbumMeta struct {
 	momentIDs []string
 }
 
-// masterAlbumBase is the fixed master album title.
 const masterAlbumBase = "Shutterfly"
 
-// maxAlbumItems caps items per Google album (API limit 20,000). A variable so
-// tests can shrink it.
+// maxAlbumItems caps items per Google album (API limit 20,000).
 var maxAlbumItems = 20000
 
-// albumTitleFor is the Google album title for a Shutterfly album name.
 func albumTitleFor(name string) string {
 	return "Shutterfly - " + Sanitize(name)
 }
 
-// normalizeID strips leading zeros and trims, matching Shutterfly's moment ID
-// normalization across the library and album APIs.
 func normalizeID(id string) string {
-	id = strings.TrimSpace(id)
-	id = strings.TrimLeft(id, "0")
-	return id
+	return strings.TrimLeft(strings.TrimSpace(id), "0")
 }
 
-// BuildTransferPlan fetches library + album membership and returns the plan.
-// It verifies the two ID spaces join; >1% unmatched album IDs aborts.
+// BuildTransferPlan fetches library + album membership.
 func (c *Client) BuildTransferPlan(restrictTo string) (*transferPlan, error) {
 	libraryIDs, err := c.GetAllMomentIDs()
 	if err != nil {
@@ -148,13 +97,12 @@ func (c *Client) BuildTransferPlan(restrictTo string) (*transferPlan, error) {
 			albumIDsTotal++
 			if !libSet[n] {
 				albumIDsMissing++
-				// still transfer album-only photos, appended at the end
 				if !seen[n] {
 					seen[n] = true
 					p.moments = append(p.moments, n)
 				}
 			}
-			p.albums[n] = append(p.albums[n], title)
+			p.albums[n] = appendUnique(p.albums[n], title)
 			meta.momentIDs = append(meta.momentIDs, n)
 		}
 		p.albumMeta = append(p.albumMeta, meta)
@@ -170,9 +118,6 @@ func (c *Client) BuildTransferPlan(restrictTo string) (*transferPlan, error) {
 	}
 	return p, nil
 }
-
-// ---------------------------------------------------------------------------
-// Download helper (bytes only, no disk)
 
 // downloadMomentBytes fetches one moment's bytes via the existing
 // retry/token-refresh machinery.
@@ -209,25 +154,37 @@ func (c *Client) downloadMomentBytes(momentID string) ([]byte, string, string, e
 // ---------------------------------------------------------------------------
 // Transfer
 
-// TransferStats summarises a run.
-type TransferStats struct {
-	Uploaded   int
-	Skipped    int
-	Failed     int
-	FailedIDs  []string
-	Bytes      int64
-	AlbumItems map[string]int // google title -> items added this run
+type uploadResult struct {
+	momentID string
+	token    string // google upload token
+	dupMIID  string // set when linked to an already-done identical item
+	fileName string
+	sha256   string
+	bytes    int64
+	err      error
 }
 
-// ToGoogle runs the streaming transfer. restrictTo limits to one Shutterfly
-// album; limit caps total moments; dryRun prints the plan without Google calls.
+type TransferStats struct {
+	Uploaded int
+	Skipped  int
+	Linked   int // content dedupe links
+	Failed   int
+	Bytes    int64
+}
+
+// ToGoogle runs the streaming transfer against the SQLite state DB.
 func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int, restrictTo string, dryRun bool) (*TransferStats, error) {
+	st, err := OpenStateDB(statePath)
+	if err != nil {
+		return nil, err
+	}
+	defer st.Close()
+
 	plan, err := c.BuildTransferPlan(restrictTo)
 	if err != nil {
 		return nil, err
 	}
 	if restrictTo != "" {
-		// keep only moments that belong to the restricted album
 		var only []string
 		for _, m := range plan.moments {
 			if len(plan.albums[m]) > 0 {
@@ -240,72 +197,77 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 		plan.moments = plan.moments[:limit]
 	}
 
-	state := loadGoogleState(statePath)
+	stats := &TransferStats{}
 
 	if dryRun {
-		fmt.Printf("\nDry run plan:\n")
-		fmt.Printf("  moments to transfer: %d\n", len(plan.moments))
-		fmt.Printf("  already done: %d\n", countDone(state, plan.moments))
-		fmt.Printf("  albums to ensure: %d (master %q + %d album albums)\n", 1+len(plan.albumMeta), masterAlbumBase, len(plan.albumMeta))
+		fmt.Printf("\nDry run plan:\n  moments to transfer: %d\n  albums to ensure: %d (master %q + %d album albums)\n",
+			len(plan.moments), 1+len(plan.albumMeta), masterAlbumBase, len(plan.albumMeta))
 		for _, m := range plan.albumMeta {
 			fmt.Printf("    %s: %d photos\n", m.title, len(m.momentIDs))
 		}
-		if len(state.Albums) > 0 {
-			fmt.Printf("  existing state albums: %d\n", len(state.Albums))
-		}
-		return &TransferStats{}, nil
+		return stats, nil
 	}
 
 	if g == nil {
 		return nil, fmt.Errorf("no Google client; provide -google-client and sign in")
 	}
 
-	stats := &TransferStats{AlbumItems: map[string]int{}}
-	failedPath := filepath.Join(filepath.Dir(statePath), "google-failed.txt")
+	// Load plan into DB (creates pending items + memberships).
+	if err := st.loadPlan(plan, masterAlbumBase); err != nil {
+		return nil, err
+	}
 
-	// Recover/create the master album (with rollover), then per-album titles.
-	masterTitle, err := ensureMasterAlbum(g, state)
+	// Ensure album rows exist on Google and store their ids.
+	if err := ensureAlbums(g, st, plan); err != nil {
+		return nil, err
+	}
+
+	// Reconcile any items left 'creating' by a previous crash.
+	if err := Reconcile(g, st); err != nil {
+		fmt.Printf("warning: reconcile failed: %v\n", err)
+	}
+
+	// Todo: pending or failed-with-attempts-left items.
+	var todo []string
+	rows, err := st.db.Query(`SELECT moment_id FROM items WHERE status='pending'`)
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureAlbumTitles(g, state, plan); err != nil {
-		return nil, err
+	for rows.Next() {
+		var id string
+		rows.Scan(&id)
+		todo = append(todo, id)
 	}
-	if err := state.save(statePath); err != nil {
-		return nil, err
-	}
-
-	// Split moments into done vs todo.
-	var todo []string
-	for _, m := range plan.moments {
-		if it, ok := state.Items[m]; ok && it.MediaItemID != "" {
-			stats.Skipped++
-		} else {
-			todo = append(todo, m)
-		}
-	}
+	rows.Close()
+	var total int64
+	st.db.QueryRow(`SELECT COUNT(*) FROM items`).Scan(&total)
+	stats.Skipped = int(total) - len(todo)
 	fmt.Printf("Transferring %d photos (%d already done, %d workers)\n", len(todo), stats.Skipped, workers)
 
-	type uploadResult struct {
-		momentID string
-		token    string
-		fileName string
-		bytes    int64
-		err      error
-	}
+	var uploaded, failed, linked int64
+	var stopFlag atomic.Bool
+
 	jobs := make(chan string)
 	results := make(chan uploadResult)
-	var stopFlag sync.Map
+	var deferred []uploadResult
 
-	// Creator: serial batchCreate into the master album.
+	// Creator: serial batchCreate + dedupe decisions; the only DB writer.
 	var creatorWG sync.WaitGroup
 	creatorWG.Add(1)
 	var creatorErr error
 	go func() {
 		defer creatorWG.Done()
+		inflight := map[string]string{} // sha256 -> momentID already queued this run
 		batch := make([]uploadResult, 0, 50)
 		flush := func() {
 			if len(batch) == 0 || creatorErr != nil {
+				return
+			}
+			masterTitle, _ := currentMasterTitle(st)
+			masterID, _ := st.albumID(masterTitle)
+			batchID := fmt.Sprintf("b%d", time.Now().UnixNano())
+			if err := st.beginBatch(batchID, batch); err != nil {
+				creatorErr = err
 				return
 			}
 			items := make([]struct{ UploadToken, FileName string }, len(batch))
@@ -313,68 +275,101 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 				items[i].UploadToken = r.token
 				items[i].FileName = r.fileName
 			}
-			created, err := g.batchCreate(state.Albums[masterTitle], items)
+			created, err := g.batchCreate(masterID, items)
 			if err != nil {
+				creatorErr = err // 'creating' reconciles next run
+				return
+			}
+			mediaIDs := map[string]string{}
+			for _, ci := range created {
+				if ci.OK {
+					mediaIDs[ci.UploadToken] = ci.MediaItemID
+				}
+			}
+			if err := st.finishBatch(masterTitle, batch, mediaIDs); err != nil {
 				creatorErr = err
 				return
 			}
-			byToken := map[string]uploadResult{}
 			for _, r := range batch {
-				byToken[r.token] = r
-			}
-			for _, ci := range created {
-				r := byToken[ci.UploadToken]
-				if ci.OK && ci.MediaItemID != "" {
-					it := state.Items[r.momentID]
-					it.MediaItemID = ci.MediaItemID
-					it.Albums = appendUnique(it.Albums, masterTitle)
-					state.Items[r.momentID] = it
-					stats.Uploaded++
-					stats.Bytes += r.bytes
-					stats.AlbumItems[masterTitle]++
+				if _, ok := mediaIDs[r.token]; ok {
+					atomic.AddInt64(&uploaded, 1)
+					atomic.AddInt64(&stats.Bytes, r.bytes)
+					delete(inflight, r.sha256)
 				} else {
-					stats.Failed++
-					stats.FailedIDs = append(stats.FailedIDs, r.momentID)
+					atomic.AddInt64(&failed, 1)
 				}
 			}
-			if err := state.save(statePath); err != nil {
-				fmt.Printf("warning: state save: %v\n", err)
+			if (uploaded+int64(stats.Skipped))%100 < 50 {
+				fmt.Printf("Progress: %d/%d done, %d failed, %.1f MB\n",
+					uploaded+int64(stats.Skipped), total, failed, float64(stats.Bytes)/1e6)
 			}
 			batch = batch[:0]
-			if (stats.Uploaded+stats.Skipped)%100 < 50 {
-				fmt.Printf("Progress: %d/%d done, %d failed, %.1f MB\n",
-					stats.Uploaded+stats.Skipped, len(plan.moments), stats.Failed, float64(stats.Bytes)/1e6)
-			}
 		}
-		// Keep draining results after an error so workers never block on send.
 		for r := range results {
-			if creatorErr != nil {
+			if stopFlag.Load() {
 				continue
 			}
 			if r.err != nil {
-				stats.Failed++
-				stats.FailedIDs = append(stats.FailedIDs, r.momentID)
+				atomic.AddInt64(&failed, 1)
 				continue
 			}
+			if r.dupMIID != "" {
+				if err := st.linkDup(r.momentID, r.dupMIID, r.sha256, "dup-of:sha"); err != nil {
+					creatorErr = err
+					return
+				}
+				atomic.AddInt64(&linked, 1)
+				continue
+			}
+			// content dedupe: already done with same hash, or in-flight
+			if dupMoment, dupMIID, ok := st.shaDone(r.sha256); ok {
+				note := "dup-of:" + dupMoment
+				if err := st.linkDup(r.momentID, dupMIID, r.sha256, note); err != nil {
+					creatorErr = err
+					return
+				}
+				// copy master+album memberships via pending pass
+				atomic.AddInt64(&linked, 1)
+				continue
+			}
+			if _, dup := inflight[r.sha256]; dup {
+				// link to the in-flight item once it's done: mark pending;
+				// shaDone will link it next pass — simplest: defer by leaving
+				// it 'pending' and letting the dedupe catch it on the next run,
+				// or re-check after flush. We handle it post-flush below.
+				r.err = fmt.Errorf("deferred-dup")
+				// park it on a deferred list appended to batch end marker
+				deferred = append(deferred, r)
+				continue
+			}
+			inflight[r.sha256] = r.momentID
 			batch = append(batch, r)
 			if len(batch) >= 50 {
 				flush()
 				if creatorErr != nil {
-					stopFlag.Store("stop", true)
+					return
 				}
 			}
 		}
 		flush()
+		// deferred dups: now that inflight items are done, link them
+		for _, r := range deferred {
+			if _, dupMIID, ok := st.shaDone(r.sha256); ok {
+				st.linkDup(r.momentID, dupMIID, r.sha256, "dup-of:inflight")
+				atomic.AddInt64(&linked, 1)
+			} else {
+				st.db.Exec(`UPDATE items SET status='pending' WHERE moment_id=?`, r.momentID)
+			}
+		}
 	}()
 
-	// Workers: download + upload, stop on quota.
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for id := range jobs {
-				if _, stopped := stopFlag.Load("stop"); stopped {
+				if stopFlag.Load() {
 					continue
 				}
 				data, mime, fname, err := c.downloadMomentBytes(id)
@@ -383,10 +378,17 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 					time.Sleep(c.RateLimit)
 					continue
 				}
+				sum := sha256.Sum256(data)
+				sha := hex.EncodeToString(sum[:])
+				// content dedupe before uploading: already-done identical bytes
+				if _, miid, ok := st.shaDone(sha); ok {
+					results <- uploadResult{momentID: id, sha256: sha, dupMIID: miid, fileName: fname, bytes: int64(len(data))}
+					time.Sleep(c.RateLimit)
+					continue
+				}
 				tok, err := g.upload(data, mime, fname)
 				if err == ErrQuota {
-					stopFlag.Store("q", true)
-					stopFlag.Store("stop", true)
+					stopFlag.Store(true)
 					results <- uploadResult{momentID: id, err: err}
 					time.Sleep(c.RateLimit)
 					continue
@@ -396,7 +398,7 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 					time.Sleep(c.RateLimit)
 					continue
 				}
-				results <- uploadResult{momentID: id, token: tok, fileName: fname, bytes: int64(len(data))}
+				results <- uploadResult{momentID: id, token: tok, fileName: fname, sha256: sha, bytes: int64(len(data))}
 				time.Sleep(c.RateLimit)
 			}
 		}()
@@ -409,149 +411,109 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 	close(results)
 	creatorWG.Wait()
 
-	if creatorErr == ErrQuota || func() bool { _, ok := stopFlag.Load("q"); return ok }() {
-		state.save(statePath)
-		writeFailed(failedPath, stats.FailedIDs)
+	stats.Uploaded = int(uploaded)
+	stats.Linked = int(linked)
+	stats.Failed = int(failed)
+	failedPath := filepath.Join(filepath.Dir(statePath), "google-failed.txt")
+
+	if creatorErr == ErrQuota || stopFlag.Load() {
+		writeFailedIDs(st, failedPath)
 		fmt.Println("\nGoogle Photos quota reached (429). State saved — re-run tomorrow to resume.")
 		return stats, ErrQuota
 	}
 	if creatorErr != nil {
-		state.save(statePath)
 		return stats, creatorErr
 	}
 
-	// Album memberships for done items.
-	if err := c.addMemberships(g, state, plan, statePath); err != nil {
-		state.save(statePath)
+	// Album memberships: pending rows where the item is done.
+	if err := addMemberships(g, st); err != nil {
 		if err == ErrQuota {
-			writeFailed(failedPath, stats.FailedIDs)
+			writeFailedIDs(st, failedPath)
 			fmt.Println("\nGoogle Photos quota reached (429). State saved — re-run tomorrow to resume.")
 			return stats, ErrQuota
 		}
 		return stats, err
 	}
 
-	if err := state.save(statePath); err != nil {
-		return nil, err
-	}
-	writeFailed(failedPath, stats.FailedIDs)
-
-	fmt.Printf("\nTransfer complete!\n")
-	fmt.Printf("  Uploaded: %d (skipped %d already done)\n", stats.Uploaded, stats.Skipped)
-	fmt.Printf("  Failed: %d\n", stats.Failed)
-	fmt.Printf("  Total bytes uploaded: %.1f MB\n", float64(stats.Bytes)/1e6)
-	for title, n := range stats.AlbumItems {
-		fmt.Printf("  %s: +%d items\n", title, n)
-	}
+	writeFailedIDs(st, failedPath)
+	fmt.Printf("\nTransfer complete!\n  Uploaded: %d (skipped %d already done, %d linked dups)\n  Failed: %d\n  Total bytes uploaded: %.1f MB\n",
+		stats.Uploaded, stats.Skipped, stats.Linked, stats.Failed, float64(stats.Bytes)/1e6)
 	return stats, nil
 }
 
-// ensureMasterAlbum returns the active master title (rollover to
-// "Shutterfly (N)" when the current one reaches maxAlbumItems), creating or
-// recovering albums as needed.
-func ensureMasterAlbum(g *GoogleClient, state *GoogleState) (string, error) {
-	// Recover albums from Google if the state lost them.
-	if len(state.Albums) == 0 {
-		existing, err := g.listAlbums()
-		if err != nil {
-			return "", err
-		}
-		for t, id := range existing {
-			state.Albums[t] = id
-		}
+// currentMasterTitle returns the first master album title not yet full.
+func currentMasterTitle(st *StateDB) (string, error) {
+	counts, err := st.membershipCounts(true)
+	if err != nil {
+		return "", err
 	}
 	for n := 1; ; n++ {
 		title := masterAlbumBase
 		if n > 1 {
 			title = fmt.Sprintf("%s (%d)", masterAlbumBase, n)
 		}
-		id, ok := state.Albums[title]
+		if counts[title] < maxAlbumItems {
+			return title, nil
+		}
+	}
+}
+
+// ensureAlbums recovers/creates all needed Google albums and stores google_id.
+func ensureAlbums(g *GoogleClient, st *StateDB, plan *transferPlan) error {
+	existing, err := g.listAlbums()
+	if err != nil {
+		return err
+	}
+	needed := map[string]bool{masterAlbumBase: true}
+	for _, meta := range plan.albumMeta {
+		needed[meta.title] = true
+	}
+	// master rollover titles may also exist already
+	for t := range existing {
+		if strings.HasPrefix(t, masterAlbumBase) {
+			needed[t] = true
+		}
+	}
+	for title := range needed {
+		if _, ok := st.albumID(title); ok {
+			continue
+		}
+		id, ok := existing[title]
 		if !ok {
 			var err error
 			id, err = g.createAlbum(title)
 			if err != nil {
-				return "", err
-			}
-			state.Albums[title] = id
-		}
-		// Count current items in state for this title; rollover when full.
-		count := 0
-		for _, it := range state.Items {
-			for _, t := range it.Albums {
-				if t == title {
-					count++
-				}
+				return err
 			}
 		}
-		if count < maxAlbumItems {
-			return title, nil
-		}
-		fmt.Printf("Master album %s full (%d items); rolling over\n", title, count)
-	}
-}
-
-// ensureAlbumTitles creates/recovers the per-Shutterfly-album Google albums.
-func ensureAlbumTitles(g *GoogleClient, state *GoogleState, plan *transferPlan) error {
-	if len(state.Albums) == 0 {
-		existing, err := g.listAlbums()
-		if err != nil {
+		if err := st.setAlbumID(title, id); err != nil {
 			return err
 		}
-		for t, id := range existing {
-			state.Albums[t] = id
-		}
-	}
-	for _, meta := range plan.albumMeta {
-		if _, ok := state.Albums[meta.title]; ok {
-			continue
-		}
-		id, err := g.createAlbum(meta.title)
-		if err != nil {
-			return err
-		}
-		state.Albums[meta.title] = id
 	}
 	return nil
 }
 
-// addMemberships batchAdds every done item into each required Google album
-// title it isn't yet recorded under (chunks of 50, all-or-nothing).
-func (c *Client) addMemberships(g *GoogleClient, state *GoogleState, plan *transferPlan, statePath string) error {
-	// For each google album title, the items that need membership added.
-	for _, meta := range plan.albumMeta {
-		albumID, ok := state.Albums[meta.title]
+// addMemberships pushes pending membership rows to Google in 50-id chunks.
+func addMemberships(g *GoogleClient, st *StateDB) error {
+	titles, err := st.membershipCounts(false)
+	if err != nil {
+		return err
+	}
+	for title := range titles {
+		albumID, ok := st.albumID(title)
 		if !ok {
 			continue
 		}
-		var pending []string
-		for _, mid := range meta.momentIDs {
-			it, ok := state.Items[mid]
-			if !ok || it.MediaItemID == "" {
-				continue
-			}
-			if !contains(it.Albums, meta.title) {
-				pending = append(pending, mid)
-			}
+		ids, err := st.pendingMemberships(title)
+		if err != nil {
+			return err
 		}
-		for i := 0; i < len(pending); i += 50 {
-			end := i + 50
-			if end > len(pending) {
-				end = len(pending)
+		for i := 0; i < len(ids); i += 50 {
+			chunk := ids[i:min(i+50, len(ids))]
+			if err := g.batchAddMediaItems(albumID, chunk); err != nil {
+				return err // all-or-nothing: rows stay added=0
 			}
-			chunk := pending[i:end]
-			ids := make([]string, len(chunk))
-			for j, mid := range chunk {
-				ids[j] = state.Items[mid].MediaItemID
-			}
-			if err := g.batchAddMediaItems(albumID, ids); err != nil {
-				return err // all-or-nothing: state stays unchanged for this chunk
-			}
-			for _, mid := range chunk {
-				it := state.Items[mid]
-				it.Albums = appendUnique(it.Albums, meta.title)
-				state.Items[mid] = it
-			}
-			if err := state.save(statePath); err != nil {
+			if err := st.markMemberships(title, chunk); err != nil {
 				return err
 			}
 		}
@@ -559,30 +521,98 @@ func (c *Client) addMemberships(g *GoogleClient, state *GoogleState, plan *trans
 	return nil
 }
 
-func countDone(state *GoogleState, moments []string) int {
-	n := 0
-	for _, m := range moments {
-		if it, ok := state.Items[m]; ok && it.MediaItemID != "" {
-			n++
+// reconcile fixes items left 'creating' by a crash around batchCreate.
+// Reconcile fixes items left creating by a crash around batchCreate.
+func Reconcile(g *GoogleClient, st *StateDB) error {
+	creating, err := st.creatingItems()
+	if err != nil || len(creating) == 0 {
+		return err
+	}
+	fmt.Printf("Reconciling %d item(s) left 'creating'...\n", len(creating))
+	assigned, err := st.assignedMediaIDs()
+	if err != nil {
+		return err
+	}
+	// filename -> unassigned media item ids
+	byName := map[string][]string{}
+	page := ""
+	for {
+		items, next, err := g.listMediaItems(page)
+		if err != nil {
+			return err
+		}
+		for _, it := range items {
+			if !assigned[it.ID] {
+				byName[it.FileName] = append(byName[it.FileName], it.ID)
+			}
+		}
+		if next == "" {
+			break
+		}
+		page = next
+	}
+
+	var byFile map[string][]string = byName
+	ambiguous := 0
+	resolved := 0
+	// group creating items by filename
+	groups := map[string][]string{}
+	for mid, fn := range creating {
+		groups[fn] = append(groups[fn], mid)
+	}
+	for fn, mids := range groups {
+		ids := byFile[fn]
+		switch {
+		case len(ids) == 0:
+			for _, mid := range mids {
+				st.markPending(mid)
+				resolved++
+			}
+		case len(ids) == len(mids):
+			// one-to-one (or same-count) assignment in id order
+			sortStrings(ids)
+			sortStrings(mids)
+			for i, mid := range mids {
+				st.markDone(mid, ids[i])
+				resolved++
+			}
+		case len(ids) == 1 && len(mids) == 1:
+			st.markDone(mids[0], ids[0])
+			resolved++
+		default:
+			ambiguous += len(mids)
+			fmt.Printf("  needs manual check: filename %q has %d remote items vs %d 'creating' rows\n", fn, len(ids), len(mids))
 		}
 	}
-	return n
+	fmt.Printf("Reconcile: %d resolved, %d ambiguous\n", resolved, ambiguous)
+	return nil
 }
 
-func writeFailed(path string, ids []string) {
-	if len(ids) == 0 {
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func sortStrings(s []string) { sort.Strings(s) }
+
+func writeFailedIDs(st *StateDB, path string) {
+	ids, err := st.failedIDs()
+	if err != nil || len(ids) == 0 {
 		os.Remove(path)
 		return
 	}
-	os.MkdirAll(filepath.Dir(path), 0700)
 	os.WriteFile(path, []byte(strings.Join(ids, "\n")+"\n"), 0600)
 }
 
 func appendUnique(s []string, v string) []string {
-	if !contains(s, v) {
-		return append(s, v)
+	for _, x := range s {
+		if x == v {
+			return s
+		}
 	}
-	return s
+	return append(s, v)
 }
 
 func contains(s []string, v string) bool {
