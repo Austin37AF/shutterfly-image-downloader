@@ -272,7 +272,8 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 	fmt.Printf("Transferring %d photos (%d already done, %d workers)\n", len(todo), stats.Skipped, workers)
 
 	var uploaded, failed, linked int64
-	var stopFlag atomic.Bool
+	var stopFlag atomic.Bool // quota (429) seen
+	var abort atomic.Bool    // creator hit an error; drain and stop
 
 	jobs := make(chan string)
 	results := make(chan uploadResult)
@@ -332,8 +333,9 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 			}
 			batch = batch[:0]
 		}
+		// Never return early: workers block on send until results is drained.
 		for r := range results {
-			if stopFlag.Load() {
+			if stopFlag.Load() || abort.Load() {
 				continue
 			}
 			if r.err != nil {
@@ -343,7 +345,8 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 			if r.dupMIID != "" {
 				if err := st.linkDup(r.momentID, r.dupMIID, r.sha256, "dup-of:sha"); err != nil {
 					creatorErr = err
-					return
+					abort.Store(true)
+					continue
 				}
 				atomic.AddInt64(&linked, 1)
 				continue
@@ -353,7 +356,8 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 				note := "dup-of:" + dupMoment
 				if err := st.linkDup(r.momentID, dupMIID, r.sha256, note); err != nil {
 					creatorErr = err
-					return
+					abort.Store(true)
+					continue
 				}
 				// copy master+album memberships via pending pass
 				atomic.AddInt64(&linked, 1)
@@ -374,7 +378,7 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 			if len(batch) >= 50 {
 				flush()
 				if creatorErr != nil {
-					return
+					abort.Store(true)
 				}
 			}
 		}
@@ -396,7 +400,7 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 		go func() {
 			defer wg.Done()
 			for id := range jobs {
-				if stopFlag.Load() {
+				if stopFlag.Load() || abort.Load() {
 					continue
 				}
 				data, mime, fname, err := c.downloadMomentBytes(id)
@@ -449,7 +453,8 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 		return stats, ErrQuota
 	}
 	if creatorErr != nil {
-		return stats, creatorErr
+		writeFailedIDs(st, failedPath)
+		return stats, fmt.Errorf("transfer stopped (state saved; re-run to resume): %w", creatorErr)
 	}
 
 	// Album memberships: pending rows where the item is done.

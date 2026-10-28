@@ -33,6 +33,7 @@ type fakeGoogle struct {
 	uploadN      int
 	batchCreateN int
 	partialFail  bool
+	createStatus int // if set, batchCreate fails with this HTTP status
 }
 
 func newFakeGoogle(t *testing.T) *fakeGoogle {
@@ -52,6 +53,10 @@ func newFakeGoogle(t *testing.T) *fakeGoogle {
 			fmt.Fprint(w, tok)
 		case r.URL.Path == "/v1/mediaItems:batchCreate":
 			f.batchCreateN++
+			if f.createStatus != 0 {
+				w.WriteHeader(f.createStatus)
+				return
+			}
 			var req struct {
 				NewMediaItems []struct {
 					SimpleMediaItem struct {
@@ -460,6 +465,39 @@ func TestQuotaStops(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Error("db not saved")
+	}
+}
+
+// A batchCreate error with more work queued must stop and save, not deadlock.
+func TestBatchCreateErrorDoesNotHang(t *testing.T) {
+	for _, status := range []int{400, 429} {
+		var downloads sync.Map
+		var ids []string
+		for i := 1; i <= 120; i++ {
+			ids = append(ids, fmt.Sprintf("%d", i))
+		}
+		sf := fakeShutterfly(t, ids, map[string][]string{}, &downloads)
+		fg := newFakeGoogle(t)
+		fg.createStatus = status
+		dbPath := filepath.Join(t.TempDir(), "s.db")
+		c := NewClient(makeToken(3600, nil), t.TempDir(), 0, false)
+		c.LibraryBase, c.AlbumBase, c.DownloadBase = sf.URL, sf.URL, sf.URL
+		g := googleClientFor(fg.Server)
+		g.Email = "t@t"
+		c.Stdin = strings.NewReader("y\n")
+		done := make(chan error, 1)
+		go func() {
+			_, err := c.ToGoogle(g, dbPath, 4, 0, "", false, "", false)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("status %d: expected an error", status)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("status %d: ToGoogle hung after batchCreate error", status)
+		}
 	}
 }
 
