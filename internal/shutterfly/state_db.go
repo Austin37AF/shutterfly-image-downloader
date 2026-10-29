@@ -88,6 +88,25 @@ func (s *StateDB) metaSet(key, value string) error {
 	return err
 }
 
+// OpenStateDBReadOnly opens an existing DB for reading without taking the run
+// lock, so -status works while a transfer is running (WAL allows concurrent
+// readers).
+func OpenStateDBReadOnly(path string) (*StateDB, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &StateDB{db: db, path: path}, nil
+}
+
 func (s *StateDB) Close() {
 	if s.db != nil {
 		s.db.Close()

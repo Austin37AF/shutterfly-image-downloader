@@ -103,7 +103,7 @@ func main() {
 		if statePath == "" {
 			statePath = os.Getenv("HOME") + "/.config/shutterfly/google-state.db"
 		}
-		st, err := shutterfly.OpenStateDB(statePath)
+		st, err := shutterfly.OpenStateDBReadOnly(statePath)
 		if err != nil {
 			fmt.Println("Error:", err)
 			os.Exit(1)

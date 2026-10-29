@@ -792,3 +792,24 @@ func TestYesWithAccountSkipsPrompt(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// -status must work while a transfer holds the run lock.
+func TestStatusReadOnlyWhileLocked(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "s.db")
+	st, err := OpenStateDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ro, err := OpenStateDBReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("read-only open while locked: %v", err)
+	}
+	defer ro.Close()
+	if err := ro.Status(); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if _, err := ro.db.Exec(`INSERT INTO meta(key,value) VALUES('x','y')`); err == nil {
+		t.Error("read-only DB accepted a write")
+	}
+}
