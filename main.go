@@ -18,7 +18,7 @@ func main() {
 	rateLimit := flag.Float64("rate-limit", 0.05, "Delay between requests per worker (seconds)")
 	workers := flag.Int("workers", 10, "Number of parallel download workers")
 	countOnly := flag.Bool("count", false, "Only count photos (with -albums: per-album counts)")
-	retryFailed := flag.Bool("retry", false, "Retry failed downloads from failed_downloads.txt")
+	retryFailed := flag.Bool("retry", false, "Retry failed downloads from failed_downloads.txt (with -to-google: retry items marked failed)")
 	verbose := flag.Bool("verbose", false, "Debug logging")
 	albums := flag.Bool("albums", false, "Album mode: download all albums")
 	album := flag.String("album", "", "Album mode: download a single album by exact name")
@@ -155,6 +155,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
+		d.RetryFailedGoogle = *retryFailed
 		stats, err := d.ToGoogle(g, statePath, *workers, *limit, *album, *dryRun, *googleAccount, *yesFlag)
 		if err != nil {
 			if stats == nil {

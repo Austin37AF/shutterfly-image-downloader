@@ -35,19 +35,20 @@ const (
 
 // Client talks to the Shutterfly APIs. Safe for concurrent use.
 type Client struct {
-	LibraryBase  string // e.g. LibraryBaseURL
-	AlbumBase    string // e.g. AlbumBaseURL
-	DownloadBase string // e.g. DownloadBaseURL
-	OutputDir    string
-	RateLimit    time.Duration
-	MaxRetries   int
-	Verbose      bool
-	LifeUID      string    // -life-uid override
-	RefreshFile  string    // Cognito refresh token file (0600)
-	CognitoBase  string    // override Cognito endpoint (tests)
-	IgnoreAlbums []string  // -ignore-albums names (matched raw or sanitized)
-	TokenFile    string    // file consulted when refreshing the token (default "token.txt")
-	Stdin        io.Reader // for the token prompt (default os.Stdin)
+	LibraryBase       string // e.g. LibraryBaseURL
+	AlbumBase         string // e.g. AlbumBaseURL
+	DownloadBase      string // e.g. DownloadBaseURL
+	OutputDir         string
+	RateLimit         time.Duration
+	MaxRetries        int
+	Verbose           bool
+	RetryFailedGoogle bool      // -to-google -retry: put failed items back to pending
+	LifeUID           string    // -life-uid override
+	RefreshFile       string    // Cognito refresh token file (0600)
+	CognitoBase       string    // override Cognito endpoint (tests)
+	IgnoreAlbums      []string  // -ignore-albums names (matched raw or sanitized)
+	TokenFile         string    // file consulted when refreshing the token (default "token.txt")
+	Stdin             io.Reader // for the token prompt (default os.Stdin)
 
 	mu          sync.Mutex // guards token/claims/expiry and serializes the refresh prompt
 	token       string

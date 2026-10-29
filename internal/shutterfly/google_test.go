@@ -813,3 +813,19 @@ func TestStatusReadOnlyWhileLocked(t *testing.T) {
 		t.Error("read-only DB accepted a write")
 	}
 }
+
+// Shutterfly serves some Live Photo ".MOV" items as JPEG stills labelled video/quicktime.
+func TestUploadTypeSniffsMislabelledJPEG(t *testing.T) {
+	jpeg := []byte("\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+	mime, name := uploadType("video/quicktime", "58232003722__0CC546C4.MOV", jpeg)
+	if mime != "image/jpeg" || name != "58232003722__0CC546C4.jpg" {
+		t.Fatalf("got %q %q", mime, name)
+	}
+	if mime, name := uploadType("image/jpeg", "a.JPG", jpeg); mime != "image/jpeg" || name != "a.JPG" {
+		t.Fatalf("jpeg unchanged: got %q %q", mime, name)
+	}
+	mov := []byte("\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00qt  ")
+	if mime, name := uploadType("video/quicktime", "b.MOV", mov); mime != "video/quicktime" || name != "b.MOV" {
+		t.Fatalf("real mov: got %q %q", mime, name)
+	}
+}

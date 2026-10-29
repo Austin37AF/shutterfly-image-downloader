@@ -144,11 +144,30 @@ func (c *Client) downloadMomentBytes(momentID string) ([]byte, string, string, e
 			filename = filepath.Base(strings.Trim(parts[1], `"' `))
 		}
 	}
-	mime := resp.Header.Get("Content-Type")
-	if mime == "" || mime == "application/octet-stream" {
-		mime = http.DetectContentType(data)
-	}
+	mime, filename := uploadType(resp.Header.Get("Content-Type"), filename, data)
 	return data, mime, filename, nil
+}
+
+// uploadType picks the MIME type and file name to send to Google. Shutterfly
+// labels some Live Photo items as video/quicktime ".MOV" while serving a JPEG
+// still; Google rejects that mismatch, so the sniffed image type wins and the
+// extension is corrected to match.
+func uploadType(header, filename string, data []byte) (string, string) {
+	sniffed := http.DetectContentType(data)
+	if strings.HasPrefix(sniffed, "image/") {
+		if !strings.HasPrefix(header, "image/") || header != sniffed {
+			if ext, ok := map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp"}[sniffed]; ok {
+				if !strings.EqualFold(filepath.Ext(filename), ext) && !(ext == ".jpg" && strings.EqualFold(filepath.Ext(filename), ".jpeg")) {
+					filename = strings.TrimSuffix(filename, filepath.Ext(filename)) + ext
+				}
+			}
+		}
+		return sniffed, filename
+	}
+	if header == "" || header == "application/octet-stream" {
+		return sniffed, filename
+	}
+	return header, filename
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +269,13 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 	}
 
 	// Reconcile any items left 'creating' by a previous crash.
+	if c.RetryFailedGoogle {
+		if n, err := st.resetFailed(); err != nil {
+			return nil, err
+		} else if n > 0 {
+			fmt.Printf("Retrying %d previously failed item(s)\n", n)
+		}
+	}
 	if err := Reconcile(g, st); err != nil {
 		fmt.Printf("warning: reconcile failed: %v\n", err)
 	}

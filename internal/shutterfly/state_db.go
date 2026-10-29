@@ -107,6 +107,15 @@ func OpenStateDBReadOnly(path string) (*StateDB, error) {
 	return &StateDB{db: db, path: path}, nil
 }
 
+// resetFailed puts 'failed' items back to pending with fresh attempts.
+func (s *StateDB) resetFailed() (int64, error) {
+	r, err := s.db.Exec(`UPDATE items SET status='pending', attempts=0, updated_at=? WHERE status='failed'`, time.Now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	return r.RowsAffected()
+}
+
 func (s *StateDB) Close() {
 	if s.db != nil {
 		s.db.Close()
