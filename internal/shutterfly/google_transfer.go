@@ -318,6 +318,18 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 				creatorErr = err
 				return
 			}
+			// Record Google's reason for per-item failures (shown by -status).
+			byToken := map[string]string{}
+			for _, r := range batch {
+				byToken[r.token] = r.momentID
+			}
+			for _, ci := range created {
+				if !ci.OK {
+					if mid, ok := byToken[ci.UploadToken]; ok {
+						st.db.Exec(`UPDATE items SET last_error=? WHERE moment_id=?`, "batchCreate: "+ci.Message, mid)
+					}
+				}
+			}
 			for _, r := range batch {
 				if _, ok := mediaIDs[r.token]; ok {
 					atomic.AddInt64(&uploaded, 1)

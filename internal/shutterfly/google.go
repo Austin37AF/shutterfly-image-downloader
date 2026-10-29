@@ -120,6 +120,7 @@ type createdItem struct {
 	UploadToken string
 	MediaItemID string
 	OK          bool
+	Message     string // Google's per-item status message on failure
 }
 
 func (g *GoogleClient) batchCreate(albumID string, items []struct {
@@ -165,7 +166,8 @@ func (g *GoogleClient) batchCreate(albumID string, items []struct {
 	out := make([]createdItem, len(result.NewMediaItemResults))
 	for i, r := range result.NewMediaItemResults {
 		ok := r.Status.Code == 0 || r.Status.Message == "Success" || r.Status.Message == "OK"
-		out[i] = createdItem{UploadToken: r.UploadToken, MediaItemID: r.MediaItem.ID, OK: ok}
+		out[i] = createdItem{UploadToken: r.UploadToken, MediaItemID: r.MediaItem.ID, OK: ok,
+			Message: fmt.Sprintf("code %d: %s", r.Status.Code, r.Status.Message)}
 	}
 	return out, nil
 }
