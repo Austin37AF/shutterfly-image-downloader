@@ -220,7 +220,17 @@ Behavior:
 - Shutterfly tokens last ~23h: when one expires mid-run, save a fresh one to
   `token.txt` in the current directory or paste it at the prompt.
 - Uploads count against the target account's Google storage; total bytes are
-  printed at the end.
+  printed at the end (originals averaged ~6 MB/photo in testing).
+
+### Combining with an iCloud Photos transfer
+
+Apple's official transfer (privacy.apple.com → Transfer a copy of your data →
+iCloud Photos → Google Photos) runs server-to-server into the same account.
+Photos present in both Shutterfly and iCloud will be duplicated in Google
+Photos; this tool can't see Apple-transferred items (the Library API only
+exposes app-created content) and can't delete anything. Planned cleanup: match
+against a Google Takeout export and gather the Shutterfly copies into a
+`Shutterfly - duplicates to delete` album for bulk deletion in the UI.
 
 Note: if `LIFE_UID` isn't set, album mode falls back to
 `SHUTTERFLY_LIBRARY_ID` before token claims — needed for accounts where the
@@ -232,10 +242,18 @@ album API's user ID is the library ID.
   (`-google-state`). Tables: `albums`, `items` (pending/creating/done/failed
   with media_item_id, sha256, attempts), `memberships`, `meta`.
 - An exclusive flock (`<db>.lock`) prevents concurrent runs.
-- `-status` prints counts/bytes/album progress/failures from the DB only.
+- `-status` prints counts/bytes/album progress/failures from the DB only. It
+  opens the DB read-only without the lock, so it works from another terminal
+  while a transfer is running.
 - `-reconcile` repairs items left `creating` by a crash around batchCreate
   (matches by filename against app-created mediaItems; ambiguous cases are
-  reported for manual check and never re-uploaded).
+  reported for manual check and never re-uploaded). A normal run reconciles
+  automatically at startup.
+- Errors: if batchCreate or a state write fails mid-run, the transfer stops
+  with `transfer stopped (state saved; re-run to resume): <reason>`; re-running
+  reconciles the interrupted batch and continues.
+- Don't rebuild `shutterfly-downloader` in place while a transfer is running
+  (replacing a running binary can kill it on macOS); build to another path.
 - Duplicates: identical bytes (sha256) upload only once — the second item
   links to the same media item. batchCreate items are marked `creating`
   before the call and `done`/`pending` after, so a crash mid-call is safe.
