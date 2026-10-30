@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -827,5 +828,43 @@ func TestUploadTypeSniffsMislabelledJPEG(t *testing.T) {
 	mov := []byte("\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00qt  ")
 	if mime, name := uploadType("video/quicktime", "b.MOV", mov); mime != "video/quicktime" || name != "b.MOV" {
 		t.Fatalf("real mov: got %q %q", mime, name)
+	}
+}
+
+// A transient 429 is retried; retries re-send the full body.
+func TestDoRetriesTransient429WithFullBody(t *testing.T) {
+	var n int32
+	var bodies []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+		switch atomic.AddInt32(&n, 1) {
+		case 1:
+			w.WriteHeader(429)
+		case 2:
+			w.WriteHeader(503)
+		default:
+			fmt.Fprint(w, "tok")
+		}
+	}))
+	defer srv.Close()
+	g := &GoogleClient{BaseURL: srv.URL, hc: srv.Client(), maxRetries: 2, quotaWaits: []time.Duration{time.Millisecond}}
+	tok, err := g.upload([]byte("photo-bytes"), "image/jpeg", "a.jpg")
+	if err != nil || tok != "tok" {
+		t.Fatalf("got %q %v", tok, err)
+	}
+	for i, b := range bodies {
+		if b != "photo-bytes" {
+			t.Errorf("attempt %d sent body %q", i+1, b)
+		}
+	}
+	// A 429 that persists past the schedule is the daily quota.
+	atomic.StoreInt32(&n, -100)
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(429) })
+	if _, err := g.upload([]byte("x"), "image/jpeg", "b.jpg"); err != ErrQuota {
+		t.Fatalf("persistent 429: got %v", err)
 	}
 }

@@ -46,6 +46,9 @@ type GoogleClient struct {
 	hc          *http.Client
 	verbose     bool
 	maxRetries  int
+	// quotaWaits: backoff schedule for 429s before treating it as the daily
+	// quota. Short-term rate limits clear within minutes; nil = stop at once.
+	quotaWaits []time.Duration
 }
 
 func (g *GoogleClient) log(format string, args ...interface{}) {
@@ -54,8 +57,19 @@ func (g *GoogleClient) log(format string, args ...interface{}) {
 	}
 }
 
-// do performs a request with backoff on 5xx; 429 maps to ErrQuota.
+// do performs a request with backoff on 5xx and network errors. A 429 is
+// retried on the quotaWaits schedule (per-minute rate limits clear quickly);
+// only a 429 that persists through it maps to ErrQuota. The body is buffered
+// so every attempt re-sends the full payload.
 func (g *GoogleClient) do(method, path string, headers map[string]string, body io.Reader) (*http.Response, error) {
+	var payload []byte
+	if body != nil {
+		var err error
+		if payload, err = io.ReadAll(body); err != nil {
+			return nil, err
+		}
+	}
+	quotaHits := 0
 	for retry := 0; retry <= g.maxRetries; retry++ {
 		if retry > 0 {
 			wait := time.Duration(1<<uint(retry))*time.Second + time.Duration(rand.Float64()*500)*time.Millisecond
@@ -64,7 +78,7 @@ func (g *GoogleClient) do(method, path string, headers map[string]string, body i
 		}
 		var b io.Reader
 		if body != nil {
-			b = body
+			b = bytes.NewReader(payload)
 		}
 		req, err := http.NewRequest(method, g.BaseURL+path, b)
 		if err != nil {
@@ -80,8 +94,18 @@ func (g *GoogleClient) do(method, path string, headers map[string]string, body i
 		}
 		switch {
 		case resp.StatusCode == 429:
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 			resp.Body.Close()
-			return nil, ErrQuota
+			if quotaHits >= len(g.quotaWaits) {
+				g.log("429 persisted: %s", strings.TrimSpace(string(data)))
+				return nil, ErrQuota
+			}
+			wait := g.quotaWaits[quotaHits]
+			quotaHits++
+			fmt.Printf("Google rate limit (429), waiting %s before retrying (%d/%d)\n", wait, quotaHits, len(g.quotaWaits))
+			time.Sleep(wait)
+			retry-- // rate-limit waits don't use up the 5xx retries
+			continue
 		case resp.StatusCode >= 200 && resp.StatusCode < 300:
 			return resp, nil
 		case resp.StatusCode >= 500:
@@ -514,7 +538,8 @@ func NewGoogleClient(clientPath, tokenPath string, verbose bool) (*GoogleClient,
 	if err != nil {
 		return nil, err
 	}
-	g := &GoogleClient{BaseURL: googleAPIBase, hc: hc, verbose: verbose, maxRetries: 3}
+	g := &GoogleClient{BaseURL: googleAPIBase, hc: hc, verbose: verbose, maxRetries: 3,
+		quotaWaits: []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute}}
 	if err := g.resolveEmail(tok); err != nil {
 		return nil, fmt.Errorf("resolving Google account email: %w", err)
 	}
