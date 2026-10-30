@@ -1,12 +1,34 @@
 # Shutterfly Image Downloader
 
-Go tool to download all photos from Shutterfly. Features:
+Go tool to get your photos out of Shutterfly: download them locally, or
+stream them straight into Google Photos. Features:
 - **Parallel downloads** - configurable worker count for speed
 - **Smart duplicate detection** - compares file content (SHA256), not just filenames
 - **EXIF date preservation** - sets file modification time from photo metadata
 - **Automatic retries** - handles network failures with exponential backoff
 - **Resume support** - skips already-downloaded files, safe to restart
 - **Failure logging** - tracks failed downloads for easy retry
+- **Album mode** - download Shutterfly albums into one folder per album
+- **Google Photos transfer** (`-to-google`) - no local copies; recreates albums;
+  resumable with duplicate guards
+- **Date repair** (`-fix-dates`) - fixes photos Google dated to the upload day
+- **Duplicate review** (`-find-duplicates`) - groups likely duplicates in a
+  review album; never deletes anything
+
+### Moving a Shutterfly library to Google Photos (end to end)
+
+1. Google Cloud setup (once): see [One-time setup](#one-time-setup).
+2. Save a Shutterfly token to `token.txt` and find your library ID
+   ([below](#getting-your-token-and-library-id)).
+3. `-to-google -dry-run`, then a small `-album` test, then the full
+   `-to-google` run. Re-run daily until done; `-status` shows progress.
+4. `-fix-dates -dry-run`, then `-fix-dates`, then delete the
+   `Shutterfly - wrong dates (delete these)` album's contents.
+5. Optional: `-find-duplicates -dry-run`, then `-find-duplicates`, and review
+   `Shutterfly - possible duplicates (review)` by hand.
+
+Tested in Oct 2026 on a 19,335-photo library (59 GB, 43 albums): about three
+days of Google quota; 891 photos needed date repair.
 
 ## Getting Your Token and Library ID
 
@@ -179,8 +201,9 @@ nothing is written to disk except the state file.
    `~/.config/shutterfly/google-client.json`
 
 > ⚠️ In Testing status, refresh tokens expire after 7 days — a long transfer
-> may need re-consent on a later run. Quota is 10,000 requests/day; a 429
-> stops cleanly and `re-run tomorrow` resumes from state.
+> may need re-consent on a later run. Quota is 10,000 requests/day (resets at
+> midnight Pacific). Short 429s are waited out; a persistent one stops cleanly
+> and re-running resumes from state.
 
 ### Commands
 
@@ -326,6 +349,24 @@ Only same-name and other groups go into the album.
 Limits: only app-created items are visible to the API (iCloud/phone photos aren't); previews are 256px, so very heavy crops may miss.
 
 ```bash
-./shutterfly-downloader -find-duplicates -dry-run -google-account <email>
-./shutterfly-downloader -find-duplicates -google-account <email>
+./shutterfly-downloader -find-duplicates -dry-run -google-account <email>   # TSV only
+./shutterfly-downloader -find-duplicates -google-account <email>            # also fills the review album
 ```
+
+No Shutterfly token is needed. Flags: `-google-account`, `-yes`, `-dry-run`,
+`-workers`, `-google-state`. Reruns only add newly found items (tracked in the
+`dup_review` table), so it's safe to run again after uploading more.
+
+Reviewing:
+- Open `Shutterfly - possible duplicates (review)`. Copies share a date, so
+  each group sits side by side.
+- Delete the copy you don't want; deleting removes it from every album, and
+  the kept copy stays in its albums.
+- The TSV's `suggested` column marks the copy with the most pixels as `keep`;
+  `max_distance_in_group` is 0 for visually identical previews.
+- `other`-class groups (e.g. `BDE333E5-….jpg` vs `IMG_1252.jpg`) are usually
+  the same photo uploaded twice under different names, but check them.
+- When finished, delete the review album itself; that doesn't delete photos.
+
+Example (Oct 2026, 19,042 items): 1,279 verified groups. Same-name 584 groups
+(584 extra copies), other 530 (675), sequence 165 (189, not added).
