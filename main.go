@@ -40,6 +40,8 @@ func main() {
 	googleAccount := flag.String("google-account", "", "Expected Google account email; refuses to run if signed in differently")
 	yesFlag := flag.Bool("yes", false, "Skip the first-run account confirmation (requires -google-account)")
 	fixDates := flag.Bool("fix-dates", false, "Re-upload photos that landed on their upload date")
+	findDupes := flag.Bool("find-duplicates", false, "Review-only: find possible duplicates in Google Photos (never deletes)")
+	dupAlbum := flag.String("dup-album", "", "With -find-duplicates: also report overlap with this Google album title")
 	flag.Parse()
 
 	accessToken := *token
@@ -56,7 +58,7 @@ func main() {
 	}
 
 	// Dedupe, -status and -reconcile work without a Shutterfly token.
-	needsToken := !*dedupe && !*statusFlag && !*reconcileFlag
+	needsToken := !*dedupe && !*statusFlag && !*reconcileFlag && !*findDupes
 	if accessToken == "" && needsToken {
 		fmt.Print("Enter token: ")
 		reader := bufio.NewReader(os.Stdin)
@@ -135,6 +137,24 @@ func main() {
 			os.Exit(1)
 		}
 		if err := shutterfly.Reconcile(g, st); err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+	case *findDupes:
+		statePath := *googleState
+		if statePath == "" {
+			statePath = os.Getenv("HOME") + "/.config/shutterfly/google-state.db"
+		}
+		clientPath := *googleClient
+		if clientPath == "" {
+			clientPath = os.Getenv("HOME") + "/.config/shutterfly/google-client.json"
+		}
+		g, err := shutterfly.NewGoogleClient(clientPath, os.Getenv("HOME")+"/.config/shutterfly/google-token.json", *verbose)
+		if err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+		if err := d.FindDuplicates(g, statePath, *workers, *dryRun, *googleAccount, *yesFlag, *dupAlbum); err != nil {
 			fmt.Println("Error:", err)
 			os.Exit(1)
 		}

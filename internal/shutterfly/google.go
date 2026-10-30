@@ -289,6 +289,69 @@ func (g *GoogleClient) listMediaItems(pageToken string) ([]struct{ ID, FileName 
 	return items, result.NextPageToken, nil
 }
 
+// batchGet returns id -> listedItem with fresh baseUrls (max 50 per call).
+func (g *GoogleClient) batchGet(ids []string) (map[string]listedItem, error) {
+	path := "/v1/mediaItems:batchGet?"
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = "mediaItemIds=" + url.QueryEscape(id)
+	}
+	resp, err := g.do("GET", path+strings.Join(parts, "&"), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		MediaItemResults []struct {
+			MediaItem struct {
+				ID       string `json:"id"`
+				FileName string `json:"filename"`
+				BaseURL  string `json:"baseUrl"`
+			} `json:"mediaItem"`
+		} `json:"mediaItemResults"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	out := map[string]listedItem{}
+	for _, r := range result.MediaItemResults {
+		out[r.MediaItem.ID] = listedItem{ID: r.MediaItem.ID, FileName: r.MediaItem.FileName, BaseURL: r.MediaItem.BaseURL}
+	}
+	return out, nil
+}
+
+// albumItems returns item ids in an album (app-created only; read-only).
+func (g *GoogleClient) albumItems(albumID string) (map[string]bool, error) {
+	out := map[string]bool{}
+	pageToken := ""
+	for {
+		body, _ := json.Marshal(map[string]interface{}{"albumId": albumID, "pageSize": 100, "pageToken": pageToken})
+		resp, err := g.do("POST", "/v1/mediaItems:search", map[string]string{"Content-Type": "application/json"}, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			MediaItems []struct {
+				ID string `json:"id"`
+			} `json:"mediaItems"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range result.MediaItems {
+			out[m.ID] = true
+		}
+		if result.NextPageToken == "" {
+			break
+		}
+		pageToken = result.NextPageToken
+	}
+	return out, nil
+}
+
 // ---------------------------------------------------------------------------
 // OAuth (installed-app loopback flow with PKCE)
 

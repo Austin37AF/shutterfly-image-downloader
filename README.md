@@ -313,3 +313,14 @@ on the first run and all succeeded on the second.
 
 Afterwards, open `Shutterfly - wrong dates (delete these)` in Google Photos,
 select all and delete; the new copies are separate items.
+
+### Finding possible duplicates (review only)
+
+`-find-duplicates` scans the items this tool uploaded and reports near-duplicates — same capture second and equal/swapped dimensions — verified visually with a 64-bit dHash (min Hamming distance over 4 rotations, threshold 4). It NEVER deletes or moves anything: it writes `~/.config/shutterfly/duplicates.tsv` (group, item, date, dims, name match, distance, suggested keep/review) and adds the items to a `Shutterfly - possible duplicates (review)` album so groups sit side by side for manual cleanup.
+
+Limits: only app-created items are visible to the API (iCloud/phone photos aren't); previews are 256px, so very heavy crops may miss.
+
+```bash
+./shutterfly-downloader -find-duplicates -dry-run -google-account <email>
+./shutterfly-downloader -find-duplicates -google-account <email>
+```

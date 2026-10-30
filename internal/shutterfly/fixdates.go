@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,9 @@ type listedItem struct {
 	ID           string
 	FileName     string
 	CreationTime time.Time
+	Width        int64
+	Height       int64
+	BaseURL      string
 }
 
 // listAllMediaItems pages all app-created items with creationTime.
@@ -72,7 +76,10 @@ func (g *GoogleClient) listMediaItemsTimed(pageToken string) ([]listedItem, stri
 			FileName      string `json:"filename"`
 			MediaMetadata struct {
 				CreationTime string `json:"creationTime"`
+				Width        string `json:"width"`
+				Height       string `json:"height"`
 			} `json:"mediaMetadata"`
+			BaseURL string `json:"baseUrl"`
 		} `json:"mediaItems"`
 		NextPageToken string `json:"nextPageToken"`
 	}
@@ -85,6 +92,9 @@ func (g *GoogleClient) listMediaItemsTimed(pageToken string) ([]listedItem, stri
 		if m.MediaMetadata.CreationTime != "" {
 			items[i].CreationTime, _ = time.Parse(time.RFC3339, m.MediaMetadata.CreationTime)
 		}
+		items[i].Width, _ = strconv.ParseInt(m.MediaMetadata.Width, 10, 64)
+		items[i].Height, _ = strconv.ParseInt(m.MediaMetadata.Height, 10, 64)
+		items[i].BaseURL = m.BaseURL
 	}
 	return items, result.NextPageToken, nil
 }
