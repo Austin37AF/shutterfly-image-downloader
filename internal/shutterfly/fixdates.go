@@ -376,6 +376,7 @@ func (c *Client) FixDates(g *GoogleClient, statePath string, workers int, dryRun
 		for r := range results {
 			if r.err != nil {
 				atomic.AddInt64(&failN, 1)
+				fmt.Printf("fix failed %s (%s): %v\n", r.momentID, r.fileName, r.err)
 				continue
 			}
 			// creating row first (crash-safety)
@@ -392,6 +393,13 @@ func (c *Client) FixDates(g *GoogleClient, statePath string, workers int, dryRun
 					return
 				}
 				atomic.AddInt64(&failN, 1)
+				reason := fmt.Sprint(err)
+				if err == nil && len(created) == 1 {
+					reason = created[0].Message
+				} else if err == nil {
+					reason = fmt.Sprintf("batchCreate returned %d results", len(created))
+				}
+				fmt.Printf("fix failed %s (%s): %s\n", r.momentID, r.fileName, reason)
 				st.db.Exec(`UPDATE date_fixes SET status='pending' WHERE moment_id=?`, r.momentID)
 				continue
 			}
