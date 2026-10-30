@@ -193,7 +193,7 @@ func (c *Client) ensureToken() error {
 	fmt.Println("\nAccess token has expired. Please provide a new token.")
 	fmt.Println("Options:")
 	fmt.Println("1. Save token to a file named 'token.txt' and press Enter")
-	fmt.Println("2. Paste token directly (if your terminal supports it)")
+	fmt.Println("2. Paste token directly (macOS terminals cut pasted input at 1024 characters, so use option 1 for long tokens)")
 
 	var newToken string
 	if data, err := os.ReadFile(c.TokenFile); err == nil {

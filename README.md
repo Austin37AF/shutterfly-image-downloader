@@ -140,7 +140,7 @@ Album mode uses a different token than library mode. To grab it:
 > ⚠️ Older accounts may still need tokens taken from different pages
 > (photos3.shutterfly.com vs photos.shutterfly.com). If your album token
 > expires mid-run, drop the new one into `token.txt` in the current directory
-> or paste it at the prompt — workers pause and continue with the new token.
+> and press Enter at the prompt — workers pause and continue with the new token.
 
 ### Album-mode flags
 
@@ -218,7 +218,15 @@ Behavior:
   re-running skips done items and fills missing memberships. Lost state
   recovers album IDs by title. Failed IDs go to `google-failed.txt`.
 - Shutterfly tokens last ~23h: when one expires mid-run, save a fresh one to
-  `token.txt` in the current directory or paste it at the prompt.
+  `token.txt` in the current directory and press Enter at the prompt (the file
+  is read and removed). Pasting at the prompt doesn't work on macOS: terminals
+  cut input at 1024 characters and the token is longer. Copy the token from
+  the browser first, then write it from the clipboard (copying a command
+  afterwards replaces the clipboard):
+  `pbpaste | tr -d '[:space:]' > token.txt && chmod 600 token.txt`
+- Google 429s are usually the per-minute limit: the tool waits (30s, 1m, 2m,
+  4m, 8m) and only stops as "daily quota reached" if they persist. Fewer
+  `-workers` means fewer waits. The daily quota resets at midnight Pacific.
 - Uploads count against the target account's Google storage; total bytes are
   printed at the end (originals averaged ~6 MB/photo in testing).
 
@@ -285,3 +293,23 @@ The dry run downloads and repairs in memory only, writing
 `~/.config/shutterfly/date-fixes.tsv` with the proposed date and source
 (exif-fixed / filename / neighbor). The normal `-to-google` upload path now
 repairs dates too, so future transfers won't hit this.
+
+How dates are chosen, in order:
+1. **exif-fixed**: an out-of-range EXIF date is normalized with carry
+   (`13:11:75` → `13:12:15`) and patched in place. Exact.
+2. **filename**: names like `20150917_081955.jpg`, `IMG_20131218_020159.jpg`,
+   `2015-09-25 18.18.52.jpg` (URL-encoded names are decoded first). Exact.
+3. **neighbor**: Shutterfly's library order is by date, newest first, so an
+   undated photo gets the midpoint of the nearest dated photos around it
+   (`gap_days` in the TSV shows how far apart they are). Usually within days,
+   but Shutterfly seems to place undated photos by when they were added, so
+   some estimates can be off by months or years; fix those individually in
+   Google Photos (Edit date & time).
+
+If Google refuses to create an item, the run prints
+`fix failed <moment> (<file>): <reason>` and leaves it pending; re-running
+retries only the unfinished items. In practice (Oct 2026) 127 of 891 failed
+on the first run and all succeeded on the second.
+
+Afterwards, open `Shutterfly - wrong dates (delete these)` in Google Photos,
+select all and delete; the new copies are separate items.
