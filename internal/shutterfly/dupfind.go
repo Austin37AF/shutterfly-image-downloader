@@ -487,9 +487,15 @@ func (c *Client) FindDuplicates(g *GoogleClient, statePath string, workers int, 
 	}
 
 	// confirm + album
+	reviewItems := 0 // sequence groups never go into the album
+	for _, grp := range out {
+		if grp.class != "sequence" {
+			reviewItems += len(grp.items)
+		}
+	}
 	confirmed := yes && expectedEmail != ""
 	if !confirmed {
-		fmt.Printf("Signed in to Google as %s. Add %d possible-duplicate items to a review album? [y/N] ", g.Email, extra+len(out))
+		fmt.Printf("Signed in to Google as %s. Add up to %d possible-duplicate items (already-added ones are skipped) to a review album? [y/N] ", g.Email, reviewItems)
 		var ans string
 		fmt.Fscan(c.Stdin, &ans)
 		confirmed = strings.EqualFold(strings.TrimSpace(ans), "y")
