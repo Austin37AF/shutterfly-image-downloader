@@ -318,6 +318,11 @@ select all and delete; the new copies are separate items.
 
 `-find-duplicates` scans the items this tool uploaded and reports near-duplicates — same capture second and equal/swapped dimensions — verified visually with a 64-bit dHash (min Hamming distance over 4 rotations, threshold 4). It NEVER deletes or moves anything: it writes `~/.config/shutterfly/duplicates.tsv` (group, item, date, dims, name match, distance, suggested keep/review) and adds the items to a `Shutterfly - possible duplicates (review)` album so groups sit side by side for manual cleanup.
 
+Each group is classified in the TSV: `same-name` (matching base filenames),
+`sequence` (camera burst/adjacent frames like IMG_1515/IMG_1516 — TSV only,
+never added to the review album), and `other` (renamed/recompressed copies).
+Only same-name and other groups go into the album.
+
 Limits: only app-created items are visible to the API (iCloud/phone photos aren't); previews are 256px, so very heavy crops may miss.
 
 ```bash

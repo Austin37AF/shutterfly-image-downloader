@@ -79,6 +79,34 @@ func TestBaseName(t *testing.T) {
 	}
 }
 
+func TestGroupClass(t *testing.T) {
+	mk := func(names ...string) []listedItem {
+		var out []listedItem
+		for _, n := range names {
+			out = append(out, listedItem{FileName: n})
+		}
+		return out
+	}
+	cases := []struct {
+		names []string
+		base  bool
+		want  string
+	}{
+		{[]string{"a.jpg", "a-1.jpg"}, true, "same-name"},
+		{[]string{"IMG_1515.JPG", "IMG_1516.JPG"}, false, "sequence"},
+		{[]string{"IMG_0844.PNG", "IMG_0845.PNG", "IMG_0847.PNG"}, false, "sequence"},
+		{[]string{"IMG_0641.JPG", "0A066D4C-1360-4560-AEBF-D66DDF473238.jpg"}, false, "other"},
+		{[]string{"IMG_0641.JPG", "IMG_0641-1.JPG"}, true, "same-name"},
+		{[]string{"DSC_0001.JPG", "IMG_0001.JPG"}, false, "other"}, // equal numbers -> other
+		{[]string{"1807.jpg", "20130707_181307.jpg"}, false, "other"},
+	}
+	for _, c := range cases {
+		if got := groupClass(mk(c.names...), c.base); got != c.want {
+			t.Errorf("%v base=%v -> %s want %s", c.names, c.base, got, c.want)
+		}
+	}
+}
+
 func TestBucketing(t *testing.T) {
 	ts := time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC)
 	mk := func(id string, w, h int64) listedItem {
@@ -167,13 +195,18 @@ func TestFindDuplicatesE2E(t *testing.T) {
 	ts := time.Date(2020, 5, 1, 10, 0, 0, 0, time.UTC)
 	same := patternImage(7, 120, 90)
 	diff := patternImage(55, 120, 90)
+	seq := patternImage(23, 120, 90)
 	previews := map[string][]byte{
 		"i1": jpegBytes(t, same), "i2": jpegBytes(t, same), "i3": jpegBytes(t, diff),
+		"i4": jpegBytes(t, seq), "i5": jpegBytes(t, seq),
 	}
 	items := []map[string]interface{}{
 		{"id": "i1", "filename": "a.jpg", "mediaMetadata": map[string]string{"creationTime": ts.Format(time.RFC3339), "width": "120", "height": "90"}},
 		{"id": "i2", "filename": "a-1.jpg", "mediaMetadata": map[string]string{"creationTime": ts.Format(time.RFC3339), "width": "120", "height": "90"}},
 		{"id": "i3", "filename": "b.jpg", "mediaMetadata": map[string]string{"creationTime": ts.Format(time.RFC3339), "width": "120", "height": "90"}},
+		// sequence group: burst names, same second, identical preview
+		{"id": "i4", "filename": "IMG_0001.JPG", "mediaMetadata": map[string]string{"creationTime": ts.Format(time.RFC3339), "width": "120", "height": "90"}},
+		{"id": "i5", "filename": "IMG_0002.JPG", "mediaMetadata": map[string]string{"creationTime": ts.Format(time.RFC3339), "width": "120", "height": "90"}},
 	}
 	fg := newDupFake(t, previews, items)
 	g := googleClientFor(fg.Server)
@@ -195,8 +228,11 @@ func TestFindDuplicatesE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 3 { // header + i1 + i2
+	if len(lines) != 5 { // header + i1+i2 + i4+i5
 		t.Fatalf("tsv: %v", lines)
+	}
+	if !strings.Contains(string(data), "sequence") || !strings.Contains(string(data), "same-name") {
+		t.Fatal("class column missing")
 	}
 
 	// real run: album created, i1+i2 added
@@ -212,6 +248,9 @@ func TestFindDuplicatesE2E(t *testing.T) {
 		for _, id := range call {
 			if id == "i3" {
 				t.Fatal("non-dup added")
+			}
+			if id == "i4" || id == "i5" {
+				t.Fatal("sequence group added to album")
 			}
 		}
 	}

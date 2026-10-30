@@ -33,6 +33,31 @@ CREATE TABLE IF NOT EXISTS dup_review(
 
 var baseNameSuffix = regexp.MustCompile(`(?i)[-_ \(~]\(?\d{1,2}\)?$`)
 
+// seqRe matches camera-sequence filenames (IMG_1515, DSC0001, GOPR1234, ...).
+var seqRe = regexp.MustCompile(`(?i)^(img|dscn|dsc|_dsc|p|gopr|imag|pict)[_-]?(\d{3,})`)
+
+// groupClass: same-name (matching base names), sequence (burst/adjacent
+// frames — all camera-sequence names but not all the same number), or other.
+func groupClass(items []listedItem, baseMatch bool) string {
+	if baseMatch {
+		return "same-name"
+	}
+	allSeq := true
+	nums := map[string]bool{}
+	for _, it := range items {
+		m := seqRe.FindStringSubmatch(strings.TrimSuffix(it.FileName, filepath.Ext(it.FileName)))
+		if m == nil {
+			allSeq = false
+			break
+		}
+		nums[m[2]] = true
+	}
+	if allSeq && len(nums) > 1 {
+		return "sequence"
+	}
+	return "other"
+}
+
 // baseName normalizes a filename for the name-match column: lowercase, no
 // extension, no trailing "-N", "_N", "(N)", "~N", " (N)".
 func baseName(name string) string {
@@ -202,6 +227,7 @@ type dupGroup struct {
 	items     []listedItem
 	maxDist   int
 	baseMatch bool
+	class     string
 	keep      string // media_item_id suggested to keep
 }
 
@@ -391,6 +417,7 @@ func (c *Client) FindDuplicates(g *GoogleClient, statePath string, workers int, 
 			}
 		}
 		g.maxDist, g.baseMatch, g.keep = maxD, sameBase, keep.ID
+		g.class = groupClass(g.items, sameBase)
 		out = append(out, g)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
@@ -401,7 +428,7 @@ func (c *Client) FindDuplicates(g *GoogleClient, statePath string, workers int, 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(f, "group_id\tmedia_item_id\tfilename\tcreation_time\twidth\theight\tbase_name_match\tmax_distance_in_group\tsuggested")
+	fmt.Fprintln(f, "group_id\tmedia_item_id\tfilename\tcreation_time\twidth\theight\tbase_name_match\tmax_distance_in_group\tsuggested\tclass")
 	extra := 0
 	noBase := 0
 	var albumOverlap int
@@ -426,8 +453,8 @@ func (c *Client) FindDuplicates(g *GoogleClient, statePath string, workers int, 
 			if g.baseMatch {
 				bm = "yes"
 			}
-			fmt.Fprintf(f, "%d\t%s\t%s\t%s\t%d\t%d\t%s\t%d\t%s\n",
-				g.id, it.ID, it.FileName, it.CreationTime.Format("2006-01-02 15:04:05"), it.Width, it.Height, bm, g.maxDist, sug)
+			fmt.Fprintf(f, "%d\t%s\t%s\t%s\t%d\t%d\t%s\t%d\t%s\t%s\n",
+				g.id, it.ID, it.FileName, it.CreationTime.Format("2006-01-02 15:04:05"), it.Width, it.Height, bm, g.maxDist, sug, g.class)
 			if albumItemIDs[it.ID] {
 				albumOverlap++
 			}
@@ -437,6 +464,18 @@ func (c *Client) FindDuplicates(g *GoogleClient, statePath string, workers int, 
 
 	fmt.Printf("\nCandidate buckets: %d, items checked: %d\n", len(bucketN), len(cand))
 	fmt.Printf("Verified groups: %d, extra copies: %d\n", len(out), extra)
+	byClass := map[string][2]int{}
+	for _, g := range out {
+		c := byClass[g.class]
+		c[0]++
+		c[1] += len(g.items) - 1
+		byClass[g.class] = c
+	}
+	for _, cl := range []string{"same-name", "other", "sequence"} {
+		if c, ok := byClass[cl]; ok {
+			fmt.Printf("  %-9s %d groups, %d extra copies\n", cl+":", c[0], c[1])
+		}
+	}
 	fmt.Printf("Groups with base_name_match=no (careful, may be bursts/edits): %d\n", noBase)
 	if albumItemIDs != nil {
 		fmt.Printf("Items in %q overlapping verified groups: %d\n", albumFilter, albumOverlap)
@@ -494,6 +533,9 @@ func (c *Client) FindDuplicates(g *GoogleClient, statePath string, workers int, 
 		gi int
 	}
 	for _, g := range out {
+		if g.class == "sequence" {
+			continue // bursts/adjacent frames: TSV only, never the review album
+		}
 		for _, it := range g.items {
 			if !added[it.ID] {
 				toAdd = append(toAdd, struct {
