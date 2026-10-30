@@ -39,6 +39,7 @@ func main() {
 	reconcileFlag := flag.Bool("reconcile", false, "Reconcile items left 'creating' by a crash and exit")
 	googleAccount := flag.String("google-account", "", "Expected Google account email; refuses to run if signed in differently")
 	yesFlag := flag.Bool("yes", false, "Skip the first-run account confirmation (requires -google-account)")
+	fixDates := flag.Bool("fix-dates", false, "Re-upload photos that landed on their upload date")
 	flag.Parse()
 
 	accessToken := *token
@@ -134,6 +135,25 @@ func main() {
 			os.Exit(1)
 		}
 		if err := shutterfly.Reconcile(g, st); err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+	case *fixDates:
+		statePath := *googleState
+		if statePath == "" {
+			statePath = os.Getenv("HOME") + "/.config/shutterfly/google-state.db"
+		}
+		clientPath := *googleClient
+		if clientPath == "" {
+			clientPath = os.Getenv("HOME") + "/.config/shutterfly/google-client.json"
+		}
+		// fix-dates needs the Google client even for -dry-run (item listing)
+		g, err := shutterfly.NewGoogleClient(clientPath, os.Getenv("HOME")+"/.config/shutterfly/google-token.json", *verbose)
+		if err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+		if err := d.FixDates(g, statePath, *workers, *dryRun, *googleAccount, *yesFlag); err != nil {
 			fmt.Println("Error:", err)
 			os.Exit(1)
 		}

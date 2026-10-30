@@ -447,6 +447,10 @@ func (c *Client) ToGoogle(g *GoogleClient, statePath string, workers, limit int,
 					time.Sleep(c.RateLimit)
 					continue
 				}
+				// repair malformed/missing EXIF dates so Google dates them right
+				if fixed, _, _ := repairDateBytes(data, fname, time.Time{}); fixed != nil {
+					data = fixed
+				}
 				sum := sha256.Sum256(data)
 				sha := hex.EncodeToString(sum[:])
 				// content dedupe before uploading: already-done identical bytes

@@ -265,3 +265,23 @@ album API's user ID is the library ID.
   > Note: Cognito auto-refresh is currently blocked by Shutterfly's AWS WAF
   > (403 ForbiddenException from this network), so the token.txt/stdin prompt
   > fallback is the supported path. No WAF-evasion is attempted.
+
+### Fixing photos that landed on the upload date
+
+Shutterfly serves some JPEGs with malformed (`13:11:75`) or missing EXIF
+dates; Google dates those items to their upload time. `-fix-dates` re-uploads
+corrected bytes, puts the new items in the same albums, and gathers the old
+items in a `Shutterfly - wrong dates (delete these)` album for manual bulk
+deletion (the API can't delete). Idempotent; resumes via `date_fixes` in the
+state DB and shares the `-to-google` run lock.
+
+```bash
+./shutterfly-downloader -fix-dates -dry-run -google-account <email>   # plan + date-fixes.tsv
+./shutterfly-downloader -fix-dates -google-account <email>
+```
+
+Flags: `-google-account`, `-yes`, `-dry-run`, `-workers`, `-google-state`.
+The dry run downloads and repairs in memory only, writing
+`~/.config/shutterfly/date-fixes.tsv` with the proposed date and source
+(exif-fixed / filename / neighbor). The normal `-to-google` upload path now
+repairs dates too, so future transfers won't hit this.
