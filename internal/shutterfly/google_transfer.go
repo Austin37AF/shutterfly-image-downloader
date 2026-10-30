@@ -569,6 +569,12 @@ func addMemberships(g *GoogleClient, st *StateDB) error {
 	if err != nil {
 		return err
 	}
+	type work struct {
+		title, albumID string
+		ids            []string
+	}
+	var todo []work
+	total := 0
 	for title := range titles {
 		albumID, ok := st.albumID(title)
 		if !ok {
@@ -578,6 +584,18 @@ func addMemberships(g *GoogleClient, st *StateDB) error {
 		if err != nil {
 			return err
 		}
+		if len(ids) > 0 {
+			todo = append(todo, work{title, albumID, ids})
+			total += len(ids)
+		}
+	}
+	if total == 0 {
+		return nil
+	}
+	fmt.Printf("\nAll photos uploaded. Adding %d photo(s) to %d album(s)...\n", total, len(todo))
+	added := 0
+	for _, w := range todo {
+		title, albumID, ids := w.title, w.albumID, w.ids
 		for i := 0; i < len(ids); i += 50 {
 			chunk := ids[i:min(i+50, len(ids))]
 			if err := g.batchAddMediaItems(albumID, chunk); err != nil {
@@ -586,7 +604,9 @@ func addMemberships(g *GoogleClient, st *StateDB) error {
 			if err := st.markMemberships(title, chunk); err != nil {
 				return err
 			}
+			added += len(chunk)
 		}
+		fmt.Printf("  %-50s +%d (%d/%d)\n", title, len(ids), added, total)
 	}
 	return nil
 }
