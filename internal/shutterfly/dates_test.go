@@ -452,3 +452,11 @@ func TestUploadRepairsDate(t *testing.T) {
 		t.Fatal("uploaded bytes not repaired")
 	}
 }
+
+func TestDateFromFilenameURLEncoded(t *testing.T) {
+	got := dateFromFilename("2015-09-25%2018.18.52.jpg")
+	want := time.Date(2015, 9, 25, 18, 18, 52, 0, time.UTC)
+	if !got.Equal(want) && got.Format("2006-01-02 15:04:05") != "2015-09-25 18:18:52" {
+		t.Fatalf("got %v", got)
+	}
+}

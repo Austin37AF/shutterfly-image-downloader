@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -237,6 +238,9 @@ var filenameDatePatterns = []*regexp.Regexp{
 }
 
 func dateFromFilename(name string) time.Time {
+	if u, err := url.PathUnescape(name); err == nil {
+		name = u // Shutterfly names can be URL-encoded ("2015-09-25%2018.18.52.jpg")
+	}
 	for _, re := range filenameDatePatterns[:2] {
 		m := re.FindStringSubmatch(name)
 		if m == nil {
